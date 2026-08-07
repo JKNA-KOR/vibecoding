@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vibecoding Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #101820;
+      color: #f8f9fa;
+    }
+    .page {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .section {
+      margin-bottom: 24px;
+      background: #161b22;
+      border: 1px solid #2f3542;
+      border-radius: 16px;
+      padding: 20px;
+    }
+    h1, h2 {
+      margin: 0 0 12px;
+      font-weight: 700;
+      color: #ffffff;
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .card {
+      padding: 18px;
+      border-radius: 16px;
+      background: linear-gradient(180deg, #1f2937 0%, #111827 100%);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    }
+    .card strong {
+      display: block;
+      font-size: 0.95rem;
+      margin-bottom: 8px;
+      color: #a5b4fc;
+    }
+    .card .value {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: #f8f9fa;
+    }
+    canvas {
+      width: 100% !important;
+      max-height: 420px;
+    }
+    .status {
+      margin-top: 12px;
+      font-size: 0.95rem;
+      color: #cbd5e1;
+      white-space: pre-line;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>Vibecoding 금 시세 대시보드</h1>
+    <div class="section">
+      <div class="cards">
+        <div class="card">
+          <strong>마이크로섹터 금광3배 ETN</strong>
+          <div class="value" id="price-microsector">--</div>
+          <div class="status" id="fx-microsector">-</div>
+          <div class="status" id="time-microsector">-</div>
+        </div>
+        <div class="card">
+          <strong>ACE KRX금현물</strong>
+          <div class="value" id="price-ace">--</div>
+          <div class="status" id="time-ace">-</div>
+        </div>
+        <div class="card">
+          <strong>금현물 예측</strong>
+          <div class="value" id="price-prediction">--</div>
+          <div class="status" id="signal-prediction">--</div>
+        </div>
+      </div>
+      <div class="status">데이터는 1개월치 이상 로드되며, 5분마다 갱신됩니다.</div>
+    </div>
+
+    <div class="section">
+      <h2>가격 추이</h2>
+      <canvas id="priceChart"></canvas>
+    </div>
+
+    <div class="section">
+      <h2>ACE KRX금현물 예측</h2>
+      <canvas id="predictionChart"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const priceChartCtx = document.getElementById('priceChart').getContext('2d');
+    const predictionChartCtx = document.getElementById('predictionChart').getContext('2d');
+
+    const priceChart = new Chart(priceChartCtx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: '마이크로섹터 금광3배 ETN (KRW/10)',
+            borderColor: '#f59e0b',
+            backgroundColor: 'rgba(245, 158, 11, 0.2)',
+            tension: 0.3,
+            data: [],
+          },
+          {
+            label: 'ACE KRX금현물',
+            borderColor: '#38bdf8',
+            backgroundColor: 'rgba(56, 189, 248, 0.2)',
+            tension: 0.3,
+            data: [],
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        interaction: {
+          mode: 'index',
+          intersect: false,
+        },
+        plugins: {
+          legend: { labels: { color: '#f8f9fa' } },
+        },
+        scales: {
+          x: { ticks: { color: '#cbd5e1' }, grid: { color: 'rgba(255,255,255,0.08)' } },
+          y: { ticks: { color: '#cbd5e1' }, grid: { color: 'rgba(255,255,255,0.08)' } },
+        },
+      },
+    });
+
+    const predictionChart = new Chart(predictionChartCtx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: 'ACE KRX금현물 실제 가격',
+            borderColor: '#38bdf8',
+            backgroundColor: 'rgba(56, 189, 248, 0.2)',
+            tension: 0.3,
+            data: [],
+          },
+          {
+            label: 'ACE KRX금현물 예측 가격',
+            borderColor: '#a78bfa',
+            backgroundColor: 'rgba(167, 139, 250, 0.2)',
+            tension: 0.3,
+            borderDash: [6, 4],
+            data: [],
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        interaction: {
+          mode: 'index',
+          intersect: false,
+        },
+        plugins: {
+          legend: { labels: { color: '#f8f9fa' } },
+        },
+        scales: {
+          x: { ticks: { color: '#cbd5e1' }, grid: { color: 'rgba(255,255,255,0.08)' } },
+          y: { ticks: { color: '#cbd5e1' }, grid: { color: 'rgba(255,255,255,0.08)' } },
+        },
+      },
+    });
+
+    async function fetchDashboardData() {
+      try {
+        const response = await fetch('/api/dashboard-data');
+        if (!response.ok) {
+          throw new Error('데이터를 불러오는 동안 문제가 발생했습니다.');
+        }
+
+        const data = await response.json();
+        const microData = data.series.MICROSECTOR_GOLD3X || [];
+        const aceData = data.series.ACE_KRX_GOLD || [];
+
+        const allTimestamps = Array.from(new Set([
+          ...microData.map(point => point.timestamp),
+          ...aceData.map(point => point.timestamp),
+        ])).sort();
+
+        priceChart.data.labels = allTimestamps;
+        priceChart.data.datasets[0].data = allTimestamps.map(label => {
+          const point = microData.find(item => item.timestamp === label);
+          return point ? point.price : null;
+        });
+        priceChart.data.datasets[1].data = allTimestamps.map(label => {
+          const point = aceData.find(item => item.timestamp === label);
+          return point ? point.price : null;
+        });
+        priceChart.update();
+
+        const predictionData = aceData.map(point => ({ x: point.timestamp, y: point.price }));
+        const predictionPoint = data.prediction.future_point ? [{ x: data.prediction.future_point.timestamp, y: data.prediction.future_point.price }] : [];
+        predictionChart.data.labels = [...predictionData.map(item => item.x), ...predictionPoint.map(item => item.x)];
+        predictionChart.data.datasets[0].data = predictionData;
+        predictionChart.data.datasets[1].data = [...predictionData, ...predictionPoint];
+        predictionChart.update();
+
+        if (microData.length) {
+          const fxRate = data.fx_rate.toLocaleString(undefined, { maximumFractionDigits: 2 });
+          const latestMicro = data.latest_quotes['마이크로섹터 금광3배 ETN'];
+          const usdPrice = latestMicro ? Number(latestMicro.price_usd).toLocaleString() : '--';
+          const krwPrice = latestMicro ? Number(latestMicro.krw_price).toLocaleString() : '--';
+          document.getElementById('price-microsector').textContent = `${usdPrice} USD\n(${krwPrice} KRW)`;
+          document.getElementById('fx-microsector').textContent = `환율 ${fxRate} KRW\n환산가 ${krwPrice} KRW`;
+        } else {
+          document.getElementById('price-microsector').textContent = '--';
+          document.getElementById('fx-microsector').textContent = '-';
+        }
+        document.getElementById('time-microsector').textContent = microData.length ? new Date(microData[microData.length - 1].timestamp).toLocaleString() : '-';
+        document.getElementById('price-ace').textContent = aceData.length ? `${aceData[aceData.length - 1].price.toLocaleString()} KRW` : '--';
+        document.getElementById('time-ace').textContent = aceData.length ? new Date(aceData[aceData.length - 1].timestamp).toLocaleString() : '-';
+        document.getElementById('price-prediction').textContent = data.prediction.predicted_price ? `${data.prediction.predicted_price.toLocaleString()} KRW` : '--';
+        document.getElementById('signal-prediction').textContent = data.prediction.recommendation + ' / ' + data.prediction.reason;
+      } catch (error) {
+        console.error(error);
+      }
+    }
+
+    fetchDashboardData();
+    setInterval(fetchDashboardData, 5 * 60 * 1000);
+  </script>
+</body>
+</html>
