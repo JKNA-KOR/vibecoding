@@ -104,3 +104,12 @@ class MarketQuote(Base):
     price = Column(Numeric(18, 4), nullable=False)
     timestamp = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+
+
+class MarketGap(Base):
+    __tablename__ = "market_gaps"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    gap_percent = Column(Numeric(10, 4), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)

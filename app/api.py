@@ -1,15 +1,35 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from decimal import Decimal
 from pathlib import Path
 from typing import Generator, Optional
 
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
 from . import database, market, models, schemas, service
+
+# configure application logging to file for easier debugging
+LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+APP_LOG_FILE = LOG_DIR / "app.log"
+
+logger = logging.getLogger("vibecoding")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    from logging.handlers import RotatingFileHandler
+
+    handler = RotatingFileHandler(APP_LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    # also log to stdout for container visibility
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
 
 app = FastAPI(title="Vibecoding Trading System")
 
@@ -19,9 +39,21 @@ market_scheduler: market.MarketScheduler | None = None
 
 @app.get("/", response_class=HTMLResponse)
 def root() -> str:
-    if not template_file.exists():
-        raise HTTPException(status_code=500, detail="dashboard.html 템플릿을 찾을 수 없습니다.")
-    return template_file.read_text(encoding="utf-8")
+    try:
+        if not template_file.exists():
+            logger.error("dashboard.html 템플릿을 찾을 수 없습니다.")
+            # return a helpful HTML page linking to the logs
+            return """
+<html><body>
+<h1>Dashboard template missing</h1>
+<p>The dashboard template <b>dashboard.html</b> was not found. Check server logs for details.</p>
+<p>View recent logs: <a href="/logs">/logs</a></p>
+</body></html>
+"""
+        return template_file.read_text(encoding="utf-8")
+    except Exception as exc:
+        logger.exception("Error rendering dashboard root: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/dashboard-data")
@@ -29,6 +61,47 @@ def get_dashboard_data() -> dict[str, object]:
     if market_scheduler is None:
         raise HTTPException(status_code=503, detail="Market scheduler is not initialized")
     return market_scheduler.get_dashboard_data()
+
+
+def _tail_file(path: Path, lines: int = 200) -> str:
+    try:
+        with path.open('rb') as f:
+            f.seek(0, 2)
+            end = f.tell()
+            size = 1024
+            data = b''
+            while lines > 0 and end > 0:
+                read_size = min(size, end)
+                f.seek(end - read_size)
+                chunk = f.read(read_size) + data
+                data = chunk
+                end -= read_size
+                lines = max(0, lines - data.count(b'\n'))
+            try:
+                return data.decode('utf-8', errors='replace').splitlines()[-200:]
+            except Exception:
+                return data.decode('utf-8', errors='replace')
+    except Exception as exc:
+        logger.exception('Failed to tail log file: %s', exc)
+        return ''
+
+
+@app.get('/logs')
+def get_logs(name: str = Query('app.log'), lines: int = Query(200)) -> PlainTextResponse:
+    # simple log tail endpoint; restrict to files under logs dir
+    safe_name = Path(name).name
+    path = LOG_DIR / safe_name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail='log file not found')
+    try:
+        # return last N lines
+        with path.open('r', encoding='utf-8', errors='replace') as f:
+            all_lines = f.readlines()
+            tail = all_lines[-int(lines):]
+            return PlainTextResponse(''.join(tail), status_code=200)
+    except Exception as exc:
+        logger.exception('Error reading log file: %s', exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.on_event("startup")
@@ -39,6 +112,7 @@ async def startup_event() -> None:
     market_scheduler.load_saved_history()
     await market_scheduler.load_initial_history()
     app.state.market_scheduler_task = asyncio.create_task(market_scheduler.run_loop())
+    logger.info('MarketScheduler started and task created')
 
 
 @app.on_event("shutdown")
@@ -132,6 +206,30 @@ def account_pnl(account_id: int, db: Session = Depends(get_db)) -> dict[str, flo
 @app.get("/market/{symbol}", response_model=schemas.QuoteRead)
 def get_market_quote(symbol: str, db: Session = Depends(get_db)) -> schemas.QuoteRead:
     return service.TradingService(db).get_market_quote(symbol)
+
+
+@app.post("/api/poll-now")
+def poll_now() -> dict[str, object]:
+    if market_scheduler is None:
+        raise HTTPException(status_code=503, detail="Market scheduler is not initialized")
+    # perform immediate poll and gap computation
+    try:
+        market_scheduler.poll_market()
+        market_scheduler._compute_and_store_gap()
+        return {"status": "ok", "gap_realtime_len": len(market_scheduler.gap_history)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/cleanup-gaps")
+def cleanup_gaps() -> dict[str, object]:
+    if market_scheduler is None:
+        raise HTTPException(status_code=503, detail="Market scheduler is not initialized")
+    try:
+        removed = market_scheduler._cleanup_old_gaps()
+        return {"status": "ok", "removed": removed}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get(

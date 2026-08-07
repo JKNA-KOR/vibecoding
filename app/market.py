@@ -13,6 +13,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
+import logging
 
 from . import crud, database, models
 from .schemas import QuoteRead
@@ -166,6 +167,20 @@ class NaverMarketProvider(BaseMarketProvider):
         return []
 
 
+class RobinhoodMarketProvider(BaseMarketProvider):
+    QUOTE_URL = "https://api.robinhood.com/quotes/GDXU/"
+
+    def get_quote(self, symbol: str) -> QuoteRead:
+        now = datetime.now(timezone.utc)
+        response = httpx.get(self.QUOTE_URL, timeout=15.0, headers={"User-Agent": "Mozilla/5.0"})
+        response.raise_for_status()
+        data = response.json()
+        price = data.get("last_trade_price") or data.get("last_extended_hours_trade_price")
+        if price is None:
+            raise MarketProviderError("Robinhood quote did not return a last trade price")
+        return QuoteRead(symbol=symbol, price=Decimal(str(price)), timestamp=now)
+
+
 class EmailNotifier:
     def __init__(
         self,
@@ -224,6 +239,7 @@ class MarketDataProvider:
 
     def __init__(self) -> None:
         self.provider = self._select_provider()
+        self.robinhood_provider = RobinhoodMarketProvider()
 
     def _select_provider(self) -> BaseMarketProvider:
         provider_name = os.getenv("MARKET_API_PROVIDER", "naver").strip().lower()
@@ -235,6 +251,9 @@ class MarketDataProvider:
 
         if provider_name == "naver":
             return NaverMarketProvider()
+
+        if provider_name == "robinhood":
+            return RobinhoodMarketProvider()
 
         if provider_name in {"external", "api"} and api_url:
             return ExternalMarketApiProvider(api_url, api_key)
@@ -253,6 +272,9 @@ class MarketDataProvider:
     def get_real_time_quote(self, symbol: str) -> QuoteRead:
         normalized_symbol = self.normalize_symbol(symbol)
         try:
+            if normalized_symbol in {"MICROSECTOR_GOLD3X", "GDXU"}:
+                quote = self.robinhood_provider.get_quote("GDXU")
+                return QuoteRead(symbol=symbol, price=quote.price, timestamp=quote.timestamp)
             quote = self.provider.get_quote(normalized_symbol)
             return QuoteRead(symbol=symbol, price=quote.price, timestamp=quote.timestamp)
         except Exception:
@@ -381,7 +403,9 @@ class MarketScheduler:
     def __init__(self) -> None:
         raw_symbols = os.getenv("MARKET_POLL_SYMBOLS", ",".join(self.DEFAULT_SYMBOLS))
         self.symbols = [symbol.strip() for symbol in raw_symbols.split(",") if symbol.strip()]
-        self.poll_interval_seconds = int(os.getenv("MARKET_POLL_INTERVAL_SECONDS", "300"))
+        self.poll_interval_seconds = int(os.getenv("MARKET_POLL_INTERVAL_SECONDS", "60"))
+        # gap calculation frequency (seconds)
+        self.gap_calc_interval_seconds = int(os.getenv("GAP_CALC_INTERVAL_SECONDS", "60"))
         self.email_interval_seconds = int(os.getenv("EMAIL_REPORT_INTERVAL_SECONDS", "3600"))
         self.initial_history_days = int(os.getenv("MARKET_HISTORY_DAYS", "30"))
         self.history_maxlen = int(os.getenv("MARKET_HISTORY_MAXLEN", "1440"))
@@ -405,7 +429,12 @@ class MarketScheduler:
             self.normalize_symbol(symbol): deque(maxlen=self.history_maxlen) for symbol in self.symbols
         }
         self.latest_quotes: dict[str, QuoteRead] = {}
+        self.gap_history: deque[dict] = deque(maxlen=self.history_maxlen)
         self.db_session_factory = database.SessionLocal
+        # retention / cleanup settings for persisted gaps
+        # default retention: 5 years (approx. 1825 days)
+        self.gap_retention_days = int(os.getenv("MARKET_GAP_RETENTION_DAYS", "1825"))
+        self.gap_cleanup_interval_seconds = int(os.getenv("GAP_CLEANUP_INTERVAL_SECONDS", "3600"))
 
     def normalize_symbol(self, symbol: str) -> str:
         return self.provider.normalize_symbol(symbol)
@@ -429,6 +458,13 @@ class MarketScheduler:
         finally:
             db.close()
 
+    def save_market_gap(self, timestamp: datetime, gap_percent: Decimal) -> None:
+        db = self.db_session_factory()
+        try:
+            crud.create_market_gap(db, timestamp=timestamp, gap_percent=gap_percent)
+        finally:
+            db.close()
+
     def load_saved_history(self) -> None:
         for symbol in self.symbols:
             normalized = self.normalize_symbol(symbol)
@@ -448,6 +484,18 @@ class MarketScheduler:
                             timestamp=model_quote.timestamp,
                         )
                     )
+        # load saved gap history from DB into in-memory gap_history
+        db = self.db_session_factory()
+        try:
+            saved_gaps = crud.list_market_gaps(db, limit=self.history_maxlen)
+        finally:
+            db.close()
+        if saved_gaps:
+            for g in reversed(saved_gaps):
+                try:
+                    self.gap_history.append({"timestamp": g.timestamp.isoformat(), "gap_percent": float(g.gap_percent)})
+                except Exception:
+                    continue
 
     def _build_synthetic_history(self, symbol: str, days: int) -> list[QuoteRead]:
         now = datetime.now(timezone.utc)
@@ -563,11 +611,46 @@ class MarketScheduler:
                     "timestamp": quote.timestamp.isoformat(),
                 }
 
-        gap_percent = None
-        if self.DEFAULT_SYMBOLS[0] in latest_quotes and ace_latest_price is not None:
-            gold_etf_div10 = Decimal(str(latest_quotes[self.DEFAULT_SYMBOLS[0]]['krw_price_div10']))
-            if ace_latest_price > 0:
-                gap_percent = float(((gold_etf_div10 - Decimal(str(ace_latest_price))) / Decimal(str(ace_latest_price)) * Decimal('100')).quantize(Decimal('0.01')))
+        # compute gap% relative to today's 9:00 KST baseline (use closest intraday quote if exact 9:00 missing)
+        gap_percent = self._calculate_daily_gap_percent(gold_history, history, latest_quotes, ace_latest_price)
+
+        # thresholds (percent) can be configured via env vars; defaults: +1.0% / -1.0%
+        pos_thresh = Decimal(os.getenv("MARKET_GAP_POS_THRESHOLD", "1.0"))
+        neg_thresh_abs = Decimal(os.getenv("MARKET_GAP_NEG_THRESHOLD", "1.0"))
+
+        gap_description = self._describe_gap_with_thresholds(gap_percent, pos_thresh, neg_thresh_abs)
+
+        # detect stale prices: no price change for the last N seconds (default 10 minutes)
+        stale_warnings: dict[str, dict[str, object]] = {}
+        now = datetime.now(timezone.utc)
+        stale_seconds_threshold = int(os.getenv("MARKET_STALE_SECONDS", str(10 * 60)))
+        for symbol in self.symbols:
+            normalized = self.normalize_symbol(symbol)
+            hist = self.history.get(normalized, deque())
+            if not hist:
+                stale_warnings[symbol] = {"is_stale": False, "minutes_since_change": None, "message": ""}
+                continue
+            last_price = hist[-1].price
+            last_change_ts = None
+            # find most recent timestamp where price was different from current
+            for q in reversed(hist):
+                if q.price != last_price:
+                    last_change_ts = q.timestamp
+                    break
+            if last_change_ts is None:
+                # never changed in history window; use oldest timestamp
+                last_change_ts = hist[0].timestamp
+
+            seconds_since_change = (now - last_change_ts).total_seconds()
+            is_stale = seconds_since_change >= stale_seconds_threshold
+            minutes = int(seconds_since_change // 60)
+            message = f"{symbol} 가격이 {minutes}분 이상 변동 없습니다." if is_stale else ""
+            stale_warnings[symbol] = {
+                "is_stale": is_stale,
+                "minutes_since_change": minutes,
+                "seconds_since_change": int(seconds_since_change),
+                "message": message,
+            }
 
         return {
             "series": series,
@@ -580,9 +663,239 @@ class MarketScheduler:
                 "reason": reason,
                 "future_point": future_point,
                 "gap_percent": gap_percent,
-                "gap_description": self._describe_gap(gap_percent),
+                "gap_description": gap_description,
+                "gap_thresholds": {"positive": float(pos_thresh), "negative_abs": float(neg_thresh_abs)},
             },
+            # gap time series for charting
+            "gap_series": self._build_gap_series(gold_history, history),
+            "predicted_gap_point": self._build_predicted_gap_point(gold_history, history, predicted_price, future_point, latest_quotes),
+            "gap_realtime_series": list(self.gap_history),
+            "stale_warnings": stale_warnings,
         }
+
+    def _calculate_daily_gap_percent(
+        self,
+        etf_history: deque[QuoteRead],
+        spot_history: deque[QuoteRead],
+        latest_quotes: dict[str, dict[str, object]],
+        ace_latest_price: Decimal | None,
+    ) -> float | None:
+        if ace_latest_price is None or self.DEFAULT_SYMBOLS[0] not in latest_quotes:
+            return None
+
+        # latest ETF value already converted to KRW/10 in latest_quotes
+        try:
+            etf_latest = Decimal(str(latest_quotes[self.DEFAULT_SYMBOLS[0]]["krw_price_div10"]))
+        except Exception:
+            return None
+
+        spot_latest = ace_latest_price
+
+        etf_open = self._find_today_open_price(etf_history, is_etf=True)
+        spot_open = self._find_today_open_price(spot_history, is_etf=False)
+
+        if etf_open is None or spot_open is None or etf_open == 0 or spot_open == 0:
+            return None
+
+        # use returns relative to open: (current / open)
+        etf_return = etf_latest / etf_open
+        spot_return = spot_latest / spot_open
+        gap_percent = (spot_return - etf_return) * Decimal("100")
+        return float(Decimal(gap_percent).quantize(Decimal("0.01")))
+
+    def _find_today_open_price(self, history: deque[QuoteRead], is_etf: bool) -> Decimal | None:
+        if not history:
+            return None
+
+        seoul_tz = ZoneInfo("Asia/Seoul")
+        now_seoul = datetime.now(timezone.utc).astimezone(seoul_tz)
+        open_start = datetime(
+            now_seoul.year,
+            now_seoul.month,
+            now_seoul.day,
+            9,
+            0,
+            tzinfo=seoul_tz,
+        )
+        today_date = open_start.date()
+
+        today_quotes: list[QuoteRead] = []
+        for quote in history:
+            try:
+                local_ts = quote.timestamp.astimezone(seoul_tz)
+            except Exception:
+                continue
+            if local_ts.date() == today_date:
+                today_quotes.append((quote, local_ts))
+
+        if not today_quotes:
+            return None
+
+        # choose quote with minimal absolute time difference to 9:00
+        best_quote, best_local = min(today_quotes, key=lambda qt: abs((qt[1] - open_start).total_seconds()))
+
+        if is_etf:
+            # convert ETF quote to KRW/10 using current fx rate
+            fx = self.provider.get_fx_rate()
+            return (best_quote.price * fx / Decimal("10")).quantize(Decimal("0.01"))
+        return best_quote.price
+
+    def _find_open_price_for_date(self, history: deque[QuoteRead], target_date, is_etf: bool) -> Decimal | None:
+        if not history:
+            return None
+
+        seoul_tz = ZoneInfo("Asia/Seoul")
+        today_quotes: list[tuple[QuoteRead, datetime]] = []
+        for quote in history:
+            try:
+                local_ts = quote.timestamp.astimezone(seoul_tz)
+            except Exception:
+                continue
+            if local_ts.date() == target_date:
+                today_quotes.append((quote, local_ts))
+
+        if not today_quotes:
+            return None
+
+        # choose quote closest to 9:00
+        open_dt = datetime(target_date.year, target_date.month, target_date.day, 9, 0, tzinfo=seoul_tz)
+        best_quote, best_local = min(today_quotes, key=lambda qt: abs((qt[1] - open_dt).total_seconds()))
+        if is_etf:
+            fx = self.provider.get_fx_rate()
+            return (best_quote.price * fx / Decimal("10")).quantize(Decimal("0.01"))
+        return best_quote.price
+
+    def _build_gap_series(self, etf_history: deque[QuoteRead], spot_history: deque[QuoteRead]) -> list[dict[str, object]]:
+        if not etf_history or not spot_history:
+            return []
+
+        seoul_tz = ZoneInfo("Asia/Seoul")
+        etf_map: dict = {}
+        for q in etf_history:
+            try:
+                d = q.timestamp.astimezone(seoul_tz).date()
+            except Exception:
+                continue
+            etf_map.setdefault(d, []).append(q)
+
+        spot_map: dict = {}
+        for q in spot_history:
+            try:
+                d = q.timestamp.astimezone(seoul_tz).date()
+            except Exception:
+                continue
+            spot_map.setdefault(d, []).append(q)
+
+        common_dates = sorted(set(etf_map.keys()) & set(spot_map.keys()))
+        series: list[dict[str, object]] = []
+        for d in common_dates:
+            etf_quotes = sorted(etf_map[d], key=lambda q: q.timestamp)
+            spot_quotes = sorted(spot_map[d], key=lambda q: q.timestamp)
+            etf_last = etf_quotes[-1]
+            spot_last = spot_quotes[-1]
+
+            etf_open = self._find_open_price_for_date(etf_history, d, True)
+            spot_open = self._find_open_price_for_date(spot_history, d, False)
+            if etf_open is None or spot_open is None or etf_open == 0 or spot_open == 0:
+                continue
+
+            fx = self.provider.get_fx_rate()
+            etf_last_krw_div10 = (etf_last.price * fx / Decimal("10")).quantize(Decimal("0.01"))
+            etf_return = etf_last_krw_div10 / etf_open
+            spot_return = spot_last.price / spot_open
+            gap = (spot_return - etf_return) * Decimal("100")
+            series.append({"timestamp": spot_last.timestamp.isoformat(), "gap_percent": float(gap.quantize(Decimal("0.01")))})
+
+        return series
+
+    def _build_predicted_gap_point(self, etf_history: deque[QuoteRead], spot_history: deque[QuoteRead], predicted_price: Decimal | None, future_point: dict | None, latest_quotes: dict[str, dict[str, object]]) -> dict | None:
+        if predicted_price is None or future_point is None or self.DEFAULT_SYMBOLS[0] not in latest_quotes:
+            return None
+
+        seoul_tz = ZoneInfo("Asia/Seoul")
+        last_date = None
+        if spot_history:
+            last_date = spot_history[-1].timestamp.astimezone(seoul_tz).date()
+        if last_date is None:
+            return None
+
+        etf_open = self._find_open_price_for_date(etf_history, last_date, True)
+        spot_open = self._find_open_price_for_date(spot_history, last_date, False)
+        if etf_open is None or spot_open is None or etf_open == 0 or spot_open == 0:
+            return None
+
+        etf_latest = Decimal(str(latest_quotes[self.DEFAULT_SYMBOLS[0]]["krw_price_div10"]))
+
+        etf_return = etf_latest / etf_open
+        spot_pred_return = Decimal(predicted_price) / spot_open
+        pred_gap = (spot_pred_return - etf_return) * Decimal("100")
+        return {"timestamp": future_point["timestamp"], "gap_percent": float(pred_gap.quantize(Decimal("0.01")))}
+
+    def _describe_gap_with_thresholds(self, gap_percent: float | None, pos_thresh: Decimal, neg_thresh_abs: Decimal) -> str:
+        if gap_percent is None:
+            return "갭 정보를 계산할 수 없습니다."
+        gap = Decimal(str(gap_percent))
+        if gap >= pos_thresh:
+            return f"갭 {gap}% ≥ +{pos_thresh}%: 금현물이 금광 ETN 대비 과도하게 강세입니다."
+        if gap <= -neg_thresh_abs:
+            return f"갭 {gap}% ≤ -{neg_thresh_abs}%: 금현물이 금광 ETN 대비 과도하게 약세입니다."
+        return f"갭 {gap}%: 중립(임계값 ±{pos_thresh}% 미만)."
+
+    def _compute_and_store_gap(self) -> None:
+        # compute current realtime gap and append to gap_history
+        try:
+            gold_alias = self.provider.normalize_symbol(self.DEFAULT_SYMBOLS[0])
+            etf_history = self.history.get(gold_alias, deque())
+            prediction_symbol = "ACE KRX금현물"
+            spot_history = self.history.get(self.normalize_symbol(prediction_symbol), deque())
+
+            # use latest stored latest_quotes
+            ace_latest_price = None
+            if prediction_symbol in self.latest_quotes:
+                ace_latest_price = self.latest_quotes[prediction_symbol].price
+
+            latest_quotes = {}
+            for symbol, quote in self.latest_quotes.items():
+                if symbol == self.DEFAULT_SYMBOLS[0]:
+                    fx = self.provider.get_fx_rate()
+                    krw_price = (quote.price * fx).quantize(Decimal("0.01"))
+                    latest_quotes[symbol] = {"krw_price_div10": float((krw_price / Decimal("10")).quantize(Decimal("0.01")))}
+
+            gap = self._calculate_daily_gap_percent(etf_history, spot_history, latest_quotes, ace_latest_price)
+            if gap is not None:
+                now_ts = datetime.now(timezone.utc)
+                self.gap_history.append({"timestamp": now_ts.isoformat(), "gap_percent": gap})
+                try:
+                    # persist gap to DB
+                    self.save_market_gap(now_ts, Decimal(str(gap)))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _cleanup_old_gaps(self) -> int:
+        # remove persisted gaps older than retention period and trim in-memory history
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=self.gap_retention_days)
+            db = self.db_session_factory()
+            try:
+                removed = crud.delete_market_gaps_older_than(db, cutoff)
+            finally:
+                db.close()
+            # trim in-memory gap_history
+            try:
+                while self.gap_history:
+                    oldest = self.gap_history[0]
+                    ts = datetime.fromisoformat(oldest["timestamp"]).astimezone(timezone.utc)
+                    if ts < cutoff:
+                        self.gap_history.popleft()
+                        continue
+                    break
+            except Exception:
+                pass
+            return removed
+        except Exception:
+            return 0
 
     def _describe_gap(self, gap_percent: float | None) -> str:
         if gap_percent is None:
@@ -628,6 +941,8 @@ class MarketScheduler:
 
     async def run_loop(self) -> None:
         next_email_time = datetime.now(timezone.utc) + timedelta(seconds=self.email_interval_seconds)
+        next_gap_time = datetime.now(timezone.utc) + timedelta(seconds=self.gap_calc_interval_seconds)
+        next_cleanup_time = datetime.now(timezone.utc) + timedelta(seconds=self.gap_cleanup_interval_seconds)
         while True:
             try:
                 self.poll_market()
@@ -640,6 +955,21 @@ class MarketScheduler:
                         except Exception:
                             pass
                     next_email_time = now + timedelta(seconds=self.email_interval_seconds)
+                if now >= next_gap_time:
+                    try:
+                        self._compute_and_store_gap()
+                    except Exception:
+                        pass
+                    next_gap_time = now + timedelta(seconds=self.gap_calc_interval_seconds)
+                if now >= next_cleanup_time:
+                    try:
+                        removed = self._cleanup_old_gaps()
+                        if removed:
+                            # log removal using standard logger
+                            logging.getLogger('vibecoding.market').info(f"removed {removed} old market_gaps")
+                    except Exception:
+                        logging.getLogger('vibecoding.market').exception('cleanup failed')
+                    next_cleanup_time = now + timedelta(seconds=self.gap_cleanup_interval_seconds)
             except Exception:
                 pass
             await asyncio.sleep(self.poll_interval_seconds)

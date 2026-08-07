@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.orm import Session
 
 from . import models
@@ -158,6 +158,29 @@ def create_market_quote(db: Session, symbol: str, price: Decimal, timestamp: dat
 def list_market_quotes(db: Session, symbol: str, limit: int = 100) -> list[models.MarketQuote]:
     query = select(models.MarketQuote).where(models.MarketQuote.symbol == symbol).order_by(models.MarketQuote.timestamp.desc()).limit(limit)
     return db.execute(query).scalars().all()
+
+
+def create_market_gap(db: Session, timestamp: datetime, gap_percent: Decimal) -> models.MarketGap:
+    gap = models.MarketGap(timestamp=timestamp, gap_percent=gap_percent)
+    db.add(gap)
+    db.commit()
+    db.refresh(gap)
+    return gap
+
+
+def list_market_gaps(db: Session, limit: int = 1000) -> list[models.MarketGap]:
+    query = select(models.MarketGap).order_by(models.MarketGap.timestamp.desc()).limit(limit)
+    return db.execute(query).scalars().all()
+
+
+def delete_market_gaps_older_than(db: Session, cutoff: datetime) -> int:
+    stmt = delete(models.MarketGap).where(models.MarketGap.timestamp < cutoff)
+    result = db.execute(stmt)
+    db.commit()
+    try:
+        return result.rowcount or 0
+    except Exception:
+        return 0
 
 
 def update_account_balance(db: Session, account: models.Account, delta: Decimal) -> models.Account:

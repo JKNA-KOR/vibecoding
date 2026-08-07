@@ -41,6 +41,9 @@
       background: linear-gradient(180deg, #1f2937 0%, #111827 100%);
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
     }
+    .card.pred-bull { background: linear-gradient(180deg, #4c1d95 0%, #7c2d12 100%); }
+    .card.pred-bear { background: linear-gradient(180deg, #0f172a 0%, #0f3466 100%); }
+    .card.pred-neutral { background: linear-gradient(180deg, #1f2937 0%, #111827 100%); }
     .card strong {
       display: block;
       font-size: 0.95rem;
@@ -54,7 +57,24 @@
     }
     canvas {
       width: 100% !important;
-      max-height: 420px;
+      max-height: 320px;
+    }
+    .charts-row {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    .chart-card {
+      flex: 1 1 480px;
+      background: transparent;
+      padding: 12px 8px;
+      border-radius: 12px;
+    }
+    .gap-card {
+      flex: 0 0 260px;
+      background: transparent;
+      padding: 12px 8px;
+      border-radius: 12px;
     }
     .status {
       margin-top: 12px;
@@ -80,24 +100,37 @@
           <div class="value" id="price-ace">--</div>
           <div class="status" id="time-ace">-</div>
         </div>
-        <div class="card">
+        <div class="card" id="card-prediction">
           <strong>금현물 예측</strong>
           <div class="value" id="price-prediction">--</div>
           <div class="status" id="signal-prediction">--</div>
           <div class="status" id="gap-prediction">-</div>
+          <div class="status" id="gap-desc-prediction">-</div>
+          <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+            <label style="font-size:0.85rem; color:#cbd5e1;">+임계:</label>
+            <input id="gap-pos-thresh" type="number" step="0.1" min="0" style="width:72px; padding:6px; border-radius:6px; border:1px solid #2f3542; background:#0b1220; color:#f8f9fa;" />
+            <label style="font-size:0.85rem; color:#cbd5e1;">-임계:</label>
+            <input id="gap-neg-thresh" type="number" step="0.1" min="0" style="width:72px; padding:6px; border-radius:6px; border:1px solid #2f3542; background:#0b1220; color:#f8f9fa;" />
+          </div>
         </div>
       </div>
       <div class="status">데이터는 1개월치 이상 로드되며, 5분마다 갱신됩니다.</div>
     </div>
 
-    <div class="section">
-      <h2>가격 추이</h2>
-      <canvas id="priceChart"></canvas>
-    </div>
-
-    <div class="section">
-      <h2>ACE KRX금현물 예측</h2>
-      <canvas id="predictionChart"></canvas>
+    <div class="section charts-row">
+      <div class="chart-card">
+        <h2>가격 추이</h2>
+        <canvas id="priceChart"></canvas>
+      </div>
+      <div class="chart-card">
+        <h2>ACE KRX금현물 예측</h2>
+        <canvas id="predictionChart"></canvas>
+      </div>
+      <div class="gap-card">
+        <h2>갭% 추이</h2>
+        <canvas id="gapChart" style="max-height:160px;"></canvas>
+        <div id="stale-warnings" class="status" style="margin-top:8px; color:#fca5a5;"></div>
+      </div>
     </div>
   </div>
 
@@ -121,6 +154,7 @@
             showLine: true,
             fill: false,
             spanGaps: true,
+            yAxisID: 'y1',
             data: [],
           },
           {
@@ -134,6 +168,7 @@
             showLine: true,
             fill: false,
             spanGaps: true,
+            yAxisID: 'y',
             data: [],
           },
         ],
@@ -146,10 +181,33 @@
         },
         plugins: {
           legend: { labels: { color: '#f8f9fa' } },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const label = context.dataset.label || '';
+                const value = context.parsed.y;
+                return `${label}: ${value.toLocaleString()}${context.dataset.yAxisID === 'y1' ? ' KRW/10' : ' KRW'}`;
+              }
+            }
+          }
         },
         scales: {
-          x: { ticks: { color: '#cbd5e1' }, grid: { color: 'rgba(255,255,255,0.08)' } },
-          y: { ticks: { color: '#cbd5e1' }, grid: { color: 'rgba(255,255,255,0.08)' } },
+          x: {
+            ticks: { color: '#cbd5e1', maxTicksLimit: 6, autoSkip: true, callback: function(value, index, ticks) { try { const label = this.getLabelForValue(value); const d = new Date(label); const mo = String(d.getMonth()+1).padStart(2,'0'); const day = String(d.getDate()).padStart(2,'0'); const hh = String(d.getHours()).padStart(2,'0'); const mm = String(d.getMinutes()).padStart(2,'0'); return `${mo}/${day} ${hh}시 ${mm}분`; } catch(e) { return value; } } },
+            grid: { color: 'rgba(255,255,255,0.08)' }
+          },
+          y: {
+            position: 'left',
+            title: { display: true, text: 'ACE KRX금현물 (KRW)', color: '#38bdf8' },
+            ticks: { color: '#cbd5e1', callback: function(value) { return value.toLocaleString(); } },
+            grid: { color: 'rgba(255,255,255,0.08)' },
+          },
+          y1: {
+            position: 'right',
+            title: { display: true, text: '금광3배 ETN (KRW/10)', color: '#f59e0b' },
+            ticks: { color: '#cbd5e1', callback: function(value) { return value.toLocaleString(); } },
+            grid: { drawOnChartArea: false },
+          },
         },
       },
     });
@@ -186,11 +244,109 @@
           legend: { labels: { color: '#f8f9fa' } },
         },
         scales: {
-          x: { ticks: { color: '#cbd5e1' }, grid: { color: 'rgba(255,255,255,0.08)' } },
+          x: {
+            ticks: { color: '#cbd5e1', maxTicksLimit: 6, autoSkip: true, callback: function(value, index, ticks) { try { const label = this.getLabelForValue(value); const d = new Date(label); const mo = String(d.getMonth()+1).padStart(2,'0'); const day = String(d.getDate()).padStart(2,'0'); const hh = String(d.getHours()).padStart(2,'0'); const mm = String(d.getMinutes()).padStart(2,'0'); return `${mo}/${day} ${hh}시 ${mm}분`; } catch(e) { return value; } } },
+            grid: { color: 'rgba(255,255,255,0.08)' }
+          },
           y: { ticks: { color: '#cbd5e1' }, grid: { color: 'rgba(255,255,255,0.08)' } },
         },
       },
     });
+
+    const gapChartCtx = document.getElementById('gapChart').getContext('2d');
+    const gapChart = new Chart(gapChartCtx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: '갭% (Spot - ETF, %)',
+            borderColor: '#f87171',
+            backgroundColor: 'rgba(248,113,113,0.15)',
+            tension: 0.3,
+            borderWidth: 2,
+            pointRadius: 2,
+            data: [],
+          },
+          {
+            label: '예측 갭%',
+            borderColor: '#a78bfa',
+            backgroundColor: 'rgba(167,139,250,0.15)',
+            tension: 0.3,
+            borderDash: [4,4],
+            pointRadius: 4,
+            data: [],
+            showLine: false,
+            fill: false,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#f8f9fa', boxWidth: 8 } } },
+        scales: {
+          x: { display: false },
+          y: { ticks: { color: '#cbd5e1' }, grid: { color: 'rgba(255,255,255,0.06)' } },
+        },
+      },
+    });
+
+    let lastDashboardData = null;
+
+    function loadUIThresholds(serverThresholds) {
+      const posInput = document.getElementById('gap-pos-thresh');
+      const negInput = document.getElementById('gap-neg-thresh');
+      const storedPos = localStorage.getItem('gap_pos');
+      const storedNeg = localStorage.getItem('gap_neg');
+      let pos, neg;
+      if (storedPos !== null) {
+        pos = Number(storedPos);
+        posInput.value = pos;
+      } else {
+        pos = (serverThresholds && serverThresholds.positive) ? serverThresholds.positive : 1.0;
+        posInput.value = pos;
+      }
+      if (storedNeg !== null) {
+        neg = Number(storedNeg);
+        negInput.value = neg;
+      } else {
+        neg = (serverThresholds && serverThresholds.negative_abs) ? serverThresholds.negative_abs : 1.0;
+        negInput.value = neg;
+      }
+      return { positive: Number(pos), negative_abs: Number(neg) };
+    }
+
+    function saveUIThresholds() {
+      const posInput = document.getElementById('gap-pos-thresh');
+      const negInput = document.getElementById('gap-neg-thresh');
+      localStorage.setItem('gap_pos', posInput.value);
+      localStorage.setItem('gap_neg', negInput.value);
+    }
+
+    function applyThresholdsToUI(data) {
+      if (!data) return;
+      const thresholds = loadUIThresholds(data.prediction.gap_thresholds || { positive: 1.0, negative_abs: 1.0 });
+      const gap = data.prediction.gap_percent;
+      const card = document.getElementById('card-prediction');
+      card.classList.remove('pred-bull', 'pred-bear', 'pred-neutral');
+      if (gap !== null && gap !== undefined) {
+        if (gap >= thresholds.positive) {
+          card.classList.add('pred-bull');
+        } else if (gap <= -thresholds.negative_abs) {
+          card.classList.add('pred-bear');
+        } else {
+          card.classList.add('pred-neutral');
+        }
+        document.getElementById('gap-desc-prediction').textContent = `갭 ${gap}%: ${gap >= thresholds.positive ? '과도한 강세' : (gap <= -thresholds.negative_abs ? '과도한 약세' : '중립')}`;
+      } else {
+        card.classList.add('pred-neutral');
+        document.getElementById('gap-desc-prediction').textContent = data.prediction.gap_description || '-';
+      }
+    }
+
+    document.getElementById('gap-pos-thresh').addEventListener('change', () => { saveUIThresholds(); applyThresholdsToUI(lastDashboardData); });
+    document.getElementById('gap-neg-thresh').addEventListener('change', () => { saveUIThresholds(); applyThresholdsToUI(lastDashboardData); });
 
     async function fetchDashboardData() {
       try {
@@ -223,7 +379,7 @@
         const predictionPoint = data.prediction.future_point ? [{ x: data.prediction.future_point.timestamp, y: data.prediction.future_point.price }] : [];
         predictionChart.data.labels = [...predictionData.map(item => item.x), ...predictionPoint.map(item => item.x)];
         predictionChart.data.datasets[0].data = predictionData;
-        predictionChart.data.datasets[1].data = [...predictionData, ...predictionPoint];
+        predictionChart.data.datasets[1].data = predictionPoint;
         predictionChart.update();
 
         if (microData.length) {
@@ -248,6 +404,33 @@
         } else {
           document.getElementById('gap-prediction').textContent = '-';
         }
+        // store last data and apply UI thresholds (persisted if set)
+        lastDashboardData = data;
+        applyThresholdsToUI(data);
+        // gap chart data
+        const gapSeries = data.gap_realtime_series && data.gap_realtime_series.length ? data.gap_realtime_series : (data.gap_series || []);
+        gapChart.data.labels = gapSeries.map(p => p.timestamp);
+        gapChart.data.datasets[0].data = gapSeries.map(p => p.gap_percent);
+        // predicted gap point
+        if (data.predicted_gap_point) {
+          gapChart.data.datasets[1].data = [{ x: data.predicted_gap_point.timestamp, y: data.predicted_gap_point.gap_percent }];
+        } else {
+          gapChart.data.datasets[1].data = [];
+        }
+        gapChart.update();
+        // render stale warnings (no price change for configured minutes)
+        const staleEl = document.getElementById('stale-warnings');
+        if (data.stale_warnings) {
+          const msgs = [];
+          for (const [sym, info] of Object.entries(data.stale_warnings)) {
+            if (info && info.is_stale && info.message) msgs.push(info.message);
+          }
+          staleEl.textContent = msgs.length ? msgs.join('\n') : '';
+        } else {
+          staleEl.textContent = '';
+        }
+        // ensure UI threshold inputs reflect initial server thresholds if localStorage empty
+        loadUIThresholds(data.prediction.gap_thresholds || { positive: 1.0, negative_abs: 1.0 });
       } catch (error) {
         console.error(error);
       }
