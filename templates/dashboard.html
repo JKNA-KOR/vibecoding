@@ -84,6 +84,7 @@
           <strong>금현물 예측</strong>
           <div class="value" id="price-prediction">--</div>
           <div class="status" id="signal-prediction">--</div>
+          <div class="status" id="gap-prediction">-</div>
         </div>
       </div>
       <div class="status">데이터는 1개월치 이상 로드되며, 5분마다 갱신됩니다.</div>
@@ -114,6 +115,12 @@
             borderColor: '#f59e0b',
             backgroundColor: 'rgba(245, 158, 11, 0.2)',
             tension: 0.3,
+            borderWidth: 3,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            showLine: true,
+            fill: false,
+            spanGaps: true,
             data: [],
           },
           {
@@ -121,6 +128,12 @@
             borderColor: '#38bdf8',
             backgroundColor: 'rgba(56, 189, 248, 0.2)',
             tension: 0.3,
+            borderWidth: 3,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            showLine: true,
+            fill: false,
+            spanGaps: true,
             data: [],
           },
         ],
@@ -218,8 +231,8 @@
           const latestMicro = data.latest_quotes['마이크로섹터 금광3배 ETN'];
           const usdPrice = latestMicro ? Number(latestMicro.price_usd).toLocaleString() : '--';
           const krwPrice = latestMicro ? Number(latestMicro.krw_price).toLocaleString() : '--';
-          document.getElementById('price-microsector').textContent = `${usdPrice} USD\n(${krwPrice} KRW)`;
-          document.getElementById('fx-microsector').textContent = `환율 ${fxRate} KRW\n환산가 ${krwPrice} KRW`;
+          document.getElementById('price-microsector').innerHTML = `${usdPrice} USD<br>(${krwPrice} KRW)`;
+          document.getElementById('fx-microsector').innerHTML = `환율 ${fxRate} KRW<br>환산가 ${krwPrice} KRW`;
         } else {
           document.getElementById('price-microsector').textContent = '--';
           document.getElementById('fx-microsector').textContent = '-';
@@ -229,6 +242,12 @@
         document.getElementById('time-ace').textContent = aceData.length ? new Date(aceData[aceData.length - 1].timestamp).toLocaleString() : '-';
         document.getElementById('price-prediction').textContent = data.prediction.predicted_price ? `${data.prediction.predicted_price.toLocaleString()} KRW` : '--';
         document.getElementById('signal-prediction').textContent = data.prediction.recommendation + ' / ' + data.prediction.reason;
+        if (data.prediction.gap_percent !== null && data.prediction.gap_percent !== undefined) {
+          const gapText = `${data.prediction.gap_percent > 0 ? '+' : ''}${data.prediction.gap_percent}%`;
+          document.getElementById('gap-prediction').textContent = `갭 ${gapText}`;
+        } else {
+          document.getElementById('gap-prediction').textContent = '-';
+        }
       } catch (error) {
         console.error(error);
       }

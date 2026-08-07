@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from email.message import EmailMessage
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -346,6 +347,33 @@ class PricePredictor:
 
         return predicted_price.quantize(Decimal("0.01")), signal, reason
 
+    @staticmethod
+    def predict_spot_from_etf(etf_history: deque[QuoteRead], spot_history: deque[QuoteRead]) -> tuple[Decimal | None, str, str]:
+        if len(etf_history) < 2 or len(spot_history) < 1:
+            return None, "HOLD", "금광 ETN과 금현물 가격 데이터가 충분하지 않습니다."
+
+        etf_last = etf_history[-1].price
+        etf_prev = etf_history[-2].price
+        spot_last = spot_history[-1].price
+
+        if etf_prev == 0 or spot_last == 0:
+            return None, "HOLD", "이전 가격 데이터가 유효하지 않습니다."
+
+        etf_delta = (etf_last - etf_prev) / etf_prev
+        predicted_price = spot_last * (Decimal("1.0") + etf_delta / Decimal("3"))
+
+        if etf_delta > Decimal("0.001"):
+            signal = "BUY"
+            reason = "금광3배 ETN이 선행 상승 신호를 보여 금현물 상승 가능성이 높아 보입니다."
+        elif etf_delta < Decimal("-0.001"):
+            signal = "SELL"
+            reason = "금광3배 ETN이 선행 하락 신호를 보여 금현물 조정 가능성이 높아 보입니다."
+        else:
+            signal = "HOLD"
+            reason = "금광3배 ETN의 움직임이 약해 금현물 관망이 유효합니다."
+
+        return predicted_price.quantize(Decimal("0.01")), signal, reason
+
 
 class MarketScheduler:
     DEFAULT_SYMBOLS = ["마이크로섹터 금광3배 ETN", "ACE KRX금현물"]
@@ -474,7 +502,6 @@ class MarketScheduler:
 
     def get_dashboard_data(self) -> dict[str, object]:
         fx_rate = self.provider.get_fx_rate()
-        fx_rate = self.provider.get_fx_rate()
         series: dict[str, list[dict[str, object]]] = {}
         gold_alias = self.provider.normalize_symbol(self.DEFAULT_SYMBOLS[0])
         for symbol in self.symbols:
@@ -502,7 +529,8 @@ class MarketScheduler:
         prediction_symbol = "ACE KRX금현물"
         normalized = self.normalize_symbol(prediction_symbol)
         history = self.history.get(normalized, deque())
-        predicted_price, signal, reason = PricePredictor.predict_price(history)
+        gold_history = self.history.get(gold_alias, deque())
+        predicted_price, signal, reason = PricePredictor.predict_spot_from_etf(gold_history, history)
         future_point = None
         if predicted_price is not None and history:
             future_point = {
@@ -512,6 +540,7 @@ class MarketScheduler:
             }
 
         latest_quotes = {}
+        ace_latest_price = None
         for symbol, quote in self.latest_quotes.items():
             if symbol == self.DEFAULT_SYMBOLS[0]:
                 krw_price = (quote.price * fx_rate).quantize(Decimal("0.01"))
@@ -522,11 +551,23 @@ class MarketScheduler:
                     "fx_rate": float(fx_rate),
                     "timestamp": quote.timestamp.isoformat(),
                 }
+            elif symbol == prediction_symbol:
+                ace_latest_price = quote.price
+                latest_quotes[symbol] = {
+                    "price": float(quote.price),
+                    "timestamp": quote.timestamp.isoformat(),
+                }
             else:
                 latest_quotes[symbol] = {
                     "price": float(quote.price),
                     "timestamp": quote.timestamp.isoformat(),
                 }
+
+        gap_percent = None
+        if self.DEFAULT_SYMBOLS[0] in latest_quotes and ace_latest_price is not None:
+            gold_etf_div10 = Decimal(str(latest_quotes[self.DEFAULT_SYMBOLS[0]]['krw_price_div10']))
+            if ace_latest_price > 0:
+                gap_percent = float(((gold_etf_div10 - Decimal(str(ace_latest_price))) / Decimal(str(ace_latest_price)) * Decimal('100')).quantize(Decimal('0.01')))
 
         return {
             "series": series,
@@ -538,8 +579,17 @@ class MarketScheduler:
                 "recommendation": signal,
                 "reason": reason,
                 "future_point": future_point,
+                "gap_percent": gap_percent,
+                "gap_description": self._describe_gap(gap_percent),
             },
         }
+
+    def _describe_gap(self, gap_percent: float | None) -> str:
+        if gap_percent is None:
+            return "갭 정보를 계산할 수 없습니다."
+        if gap_percent >= 0:
+            return "금현물이 금광 ETN 대비 과도하게 강세입니다."
+        return "금현물이 금광 ETN 대비 과도하게 약세입니다."
 
     def build_report(self) -> str:
         lines: list[str] = [
