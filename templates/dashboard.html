@@ -72,9 +72,38 @@
     }
     .prediction-metrics {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 8px;
-      margin-top: 12px;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin: 12px 0 16px 0;
+    }
+
+    .metric-item {
+      padding: 10px 8px;
+      border-radius: 8px;
+      background: #0b1220;
+      border: 1px solid #2f3542;
+      text-align: center;
+    }
+
+    .metric-label {
+      display: block;
+      font-size: 12px;
+      color: #94a3b8;
+      margin-bottom: 5px;
+    }
+
+    .metric-item strong {
+      display: block;
+      font-size: 18px;
+      color: #f8f9fa;
+    }
+
+    .metric-item small {
+      display: block;
+      margin-top: 5px;
+      font-size: 10px;
+      color: #64748b;
+      line-height: 1.3;
     }
 
     .metric-item {
@@ -83,6 +112,14 @@
       background: #0b1220;
       border: 1px solid #2f3542;
       text-align: center;
+    }
+
+    .metric-item small {
+      display: block;
+      margin-top: 5px;
+      font-size: 10px;
+      color: #64748b;
+      line-height: 1.3;
     }
 
     .metric-label {
@@ -147,7 +184,25 @@
           </div>
         </div>
       </div>
-      <div class="status">데이터는 1개월치 이상 로드되며, 5분마다 갱신됩니다.</div>
+      <div class="prediction-metrics dashboard-metrics">
+        <div class="metric-item">
+          <span class="metric-label">방향 예측률</span>
+          <strong id="directionAccuracy">-</strong>
+          <small>상승·하락 방향을 맞힌 비율</small>
+        </div>
+
+        <div class="metric-item">
+          <span class="metric-label">평균 오차</span>
+          <strong id="modelMae">-</strong>
+          <small>예측 가격과 실제 가격의 평균 차이</small>
+        </div>
+
+        <div class="metric-item">
+          <span class="metric-label">예측 설명력</span>
+          <strong id="modelR2">-</strong>
+          <small>가격 움직임을 설명하는 정도</small>
+        </div>
+      </div>
     </div>
 
     <div class="section charts-row">
@@ -159,32 +214,7 @@
         <h2>ACE KRX금현물 예측</h2>
         <canvas id="predictionChart"></canvas>
 
-        <div class="prediction-metrics">
-          <div class="metric-item">
-            <span class="metric-label">방향성 적중률</span>
-            <strong id="directionAccuracy">-</strong>
-          </div>
-
-          <div class="metric-item">
-            <span class="metric-label">MAE</span>
-            <strong id="modelMae">-</strong>
-          </div>
-
-          <div class="metric-item">
-            <span class="metric-label">RMSE</span>
-            <strong id="modelRmse">-</strong>
-          </div>
-
-          <div class="metric-item">
-            <span class="metric-label">R²</span>
-            <strong id="modelR2">-</strong>
-          </div>
-
-          <div class="metric-item">
-            <span class="metric-label">학습 샘플</span>
-            <strong id="modelSamples">-</strong>
-          </div>
-        </div>
+       
       </div>
       <div class="gap-card">
         <h2>갭% 추이</h2>
@@ -444,30 +474,32 @@
 
         const metrics = data.prediction?.model_metrics || {};
 
-        document.getElementById('directionAccuracy').textContent =
-          metrics.direction_accuracy != null
-            ? `${metrics.direction_accuracy}%`
-            : '-';
+        const directionAccuracyEl = document.getElementById('directionAccuracy');
+        if (directionAccuracyEl) {
+          directionAccuracyEl.textContent =
+            metrics.direction_accuracy != null
+              ? `${Number(metrics.direction_accuracy).toFixed(2)}%`
+              : '-';
+        }
 
-        document.getElementById('modelMae').textContent =
-          metrics.mae_percent != null
-            ? `${metrics.mae_percent}%`
-            : '-';
+        const modelMaeEl = document.getElementById('modelMae');
+        if (modelMaeEl) {
+          modelMaeEl.textContent =
+            metrics.mae_percent != null
+              ? `${Number(metrics.mae_percent).toFixed(3)}%`
+              : '-';
+        }
 
-        document.getElementById('modelRmse').textContent =
-          metrics.rmse_percent != null
-            ? `${metrics.rmse_percent}%`
-            : '-';
+        const modelR2El = document.getElementById('modelR2');
+        if (modelR2El) {
+          modelR2El.textContent =
+            metrics.r2 != null
+              ? `${(Number(metrics.r2) * 100).toFixed(2)}%`
+              : '-';
+        }
 
-        document.getElementById('modelR2').textContent =
-          metrics.r2 != null
-            ? metrics.r2
-            : '-';
 
-        document.getElementById('modelSamples').textContent =
-          metrics.sample_count != null
-            ? metrics.sample_count
-            : '-';
+
 
         if (microData.length) {
           const fxRate = data.fx_rate.toLocaleString(undefined, { maximumFractionDigits: 2 });

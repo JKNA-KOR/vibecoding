@@ -120,6 +120,8 @@ class NaverMarketProvider(BaseMarketProvider):
     SYMBOL_TO_QUERY: dict[str, str] = {
         "MICROSECTOR_GOLD3X": "GDXU",
         "ACE_KRX_GOLD": "411060",
+        "GOLD_FUTURES": "225130",
+        "GOLD_MINERS": "473640",
     }
 
     FX_QUERY_URL = "https://search.naver.com/search.naver?query=USD+KRW"
@@ -128,42 +130,126 @@ class NaverMarketProvider(BaseMarketProvider):
         now = datetime.now(timezone.utc)
         query_symbol = self.SYMBOL_TO_QUERY.get(symbol, symbol)
 
-        if query_symbol == "411060":
+        if query_symbol.isdigit():
             url = f"https://finance.naver.com/item/main.naver?code={query_symbol}"
-            response = httpx.get(url, timeout=15.0, headers={"User-Agent": "Mozilla/5.0"})
+
+            response = httpx.get(
+                url,
+                timeout=15.0,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/150.0.0.0 Safari/537.36"
+                    )
+                },
+            )
             response.raise_for_status()
+
             html = response.text
-            match = re.search(r'<p class="no_today">.*?<span class="blind">([^<]+)</span>', html, re.S)
+
+            match = re.search(
+                r'<p class="no_today">.*?'
+                r'<span class="blind">\s*([^<]+)\s*</span>',
+                html,
+                re.S,
+            )
+
             if not match:
-                raise MarketProviderError("Naver item page did not contain expected price")
+                match = re.search(
+                    r'<span class="blind">\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*</span>',
+                    html,
+                    re.S,
+                )
+
+            if not match:
+                raise MarketProviderError(
+                    f"Naver item page did not contain expected price: {query_symbol}"
+                )
+
             price_text = match.group(1).strip()
+
         else:
             url = f"https://search.naver.com/search.naver?query={query_symbol}"
-            response = httpx.get(url, timeout=15.0, headers={"User-Agent": "Mozilla/5.0"})
+
+            response = httpx.get(
+                url,
+                timeout=15.0,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/150.0.0.0 Safari/537.36"
+                    )
+                },
+            )
             response.raise_for_status()
+
             html = response.text
-            match = re.search(r'<strong class="now">현재가</strong>\s*<span class="blind">([^<]+)</span>', html)
+
+            match = re.search(
+                r'<strong class="now">현재가</strong>\s*'
+                r'<span class="blind">\s*([^<]+)\s*</span>',
+                html,
+                re.S,
+            )
+
             if not match:
-                raise MarketProviderError("Naver search page did not contain expected price")
+                raise MarketProviderError(
+                    f"Naver search page did not contain expected price: {query_symbol}"
+                )
+
             price_text = match.group(1).strip()
 
-        price_number = re.search(r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?", price_text)
-        if not price_number:
-            raise MarketProviderError("Failed to parse Naver price text")
+        price_number = re.search(
+            r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?",
+            price_text,
+        )
 
-        price_value = Decimal(price_number.group(0).replace(",", ""))
-        return QuoteRead(symbol=symbol, price=price_value, timestamp=now)
+        if not price_number:
+            raise MarketProviderError(
+                f"Failed to parse Naver price text: {price_text}"
+            )
+
+        price_value = Decimal(
+            price_number.group(0).replace(",", "")
+        )
+
+        return QuoteRead(
+            symbol=symbol,
+            price=price_value,
+            timestamp=now,
+        )
 
     def get_fx_rate(self) -> Decimal:
-        response = httpx.get(self.FX_QUERY_URL, timeout=15.0, headers={"User-Agent": "Mozilla/5.0"})
+        response = httpx.get(
+            self.FX_QUERY_URL,
+            timeout=15.0,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
         response.raise_for_status()
+
         html = response.text
-        match = re.search(r'<span class="nb_txt _pronunciation" data-currency-unit="원">\s*([0-9,]+(?:\.[0-9]+)?)\s*원</span>', html)
+
+        match = re.search(
+            r'<span class="nb_txt _pronunciation" '
+            r'data-currency-unit="원">\s*'
+            r'([0-9,]+(?:\.[0-9]+)?)\s*원</span>',
+            html,
+        )
+
         if not match:
-            raise MarketProviderError("Naver FX 검색 페이지에서 환율을 가져오지 못했습니다")
+            raise MarketProviderError(
+                "Naver FX 검색 페이지에서 환율을 가져오지 못했습니다"
+            )
+
         return Decimal(match.group(1).replace(",", ""))
 
-    def get_historical_quotes(self, symbol: str, days: int = 30) -> list[QuoteRead]:
+    def get_historical_quotes(
+        self,
+        symbol: str,
+        days: int = 30,
+    ) -> list[QuoteRead]:
         return []
 
 
@@ -222,24 +308,55 @@ class MarketDataProvider:
     SYMBOL_ALIASES: dict[str, str] = {
         "마이크로섹터 금광3배 ETN": "MICROSECTOR_GOLD3X",
         "마이크로섹터금광3배ETN": "MICROSECTOR_GOLD3X",
+
         "ACE KRX금현물": "ACE_KRX_GOLD",
         "ACE KRX 금현물": "ACE_KRX_GOLD",
         "ACE XRX금현물": "ACE_KRX_GOLD",
         "ACE_XRX_GOLD": "ACE_KRX_GOLD",
+
+        "ACE 골드선물 레버리지": "GOLD_FUTURES",
+        "ACE 골드선물레버리지": "GOLD_FUTURES",
+        "GOLD_FUTURES": "GOLD_FUTURES",
+
+        "HANARO 글로벌금채굴기업": "GOLD_MINERS",
+        "GOLD_MINERS": "GOLD_MINERS",
+
         "MICROSECTOR_GOLD3X": "MICROSECTOR_GOLD3X",
         "ACE_KRX_GOLD": "ACE_KRX_GOLD",
         "KODEXGOLD": "KODEXGOLD",
     }
 
-    FALLBACK_PRICES: dict[str, Decimal] = {
-    "MICROSECTOR_GOLD3X": None,
-    "ACE_KRX_GOLD": None,
-    "KODEXGOLD": None,
+    # 국내 장중 지표
+    KOREAN_GOLD_SYMBOLS = {
+        "GOLD_FUTURES": "225130",   # ACE 골드선물 레버리지
+        "GOLD_MINERS": "473640",    # HANARO 글로벌금채굴기업
+        "ACE_KRX_GOLD": "411060",   # ACE KRX금현물
+    }
+
+    # Yahoo historical용
+    YAHOO_HISTORY_SYMBOLS = {
+        "MICROSECTOR_GOLD3X": "GDXU",
+        "GOLD_FUTURES": "225130.KS",
+        "GOLD_MINERS": "473640.KS",
+        "ACE_KRX_GOLD": "411060.KS",
+    }
+
+    FALLBACK_PRICES: dict[str, Decimal | None] = {
+        "MICROSECTOR_GOLD3X": None,
+        "GOLD_FUTURES": None,
+        "GOLD_MINERS": None,
+        "ACE_KRX_GOLD": None,
+        "KODEXGOLD": None,
     }
 
     def __init__(self) -> None:
         self.provider = self._select_provider()
+
         self.robinhood_provider = RobinhoodMarketProvider()
+        self.naver_provider = NaverMarketProvider()
+        self.yahoo_provider = YahooFinanceProvider()
+
+        self.kst_timezone = ZoneInfo("Asia/Seoul")
 
     def _select_provider(self) -> BaseMarketProvider:
         provider_name = os.getenv("MARKET_API_PROVIDER", "naver").strip().lower()
@@ -271,14 +388,57 @@ class MarketDataProvider:
 
     def get_real_time_quote(self, symbol: str) -> QuoteRead:
         normalized_symbol = self.normalize_symbol(symbol)
+
         try:
-            if normalized_symbol in {"MICROSECTOR_GOLD3X", "GDXU"}:
+            # --------------------------------------------------
+            # GDXU
+            # --------------------------------------------------
+            if normalized_symbol == "MICROSECTOR_GOLD3X":
                 quote = self.robinhood_provider.get_quote("GDXU")
-                return QuoteRead(symbol=symbol, price=quote.price, timestamp=quote.timestamp)
+
+                return QuoteRead(
+                    symbol=symbol,
+                    price=quote.price,
+                    timestamp=quote.timestamp,
+                )
+
+            # --------------------------------------------------
+            # 한국 장중 GOLD 관련 지표
+            # --------------------------------------------------
+            if normalized_symbol in self.KOREAN_GOLD_SYMBOLS:
+                query_symbol = self.KOREAN_GOLD_SYMBOLS[normalized_symbol]
+
+                quote = self.naver_provider.get_quote(query_symbol)
+
+                return QuoteRead(
+                    symbol=symbol,
+                    price=quote.price,
+                    timestamp=quote.timestamp,
+                )
+
+            # --------------------------------------------------
+            # 기타 종목
+            # --------------------------------------------------
             quote = self.provider.get_quote(normalized_symbol)
-            return QuoteRead(symbol=symbol, price=quote.price, timestamp=quote.timestamp)
-        except Exception:
-            return self._get_fallback_quote(normalized_symbol, symbol)
+
+            return QuoteRead(
+                symbol=symbol,
+                price=quote.price,
+                timestamp=quote.timestamp,
+            )
+
+        except Exception as exc:
+            logging.warning(
+                "실시간 시세 조회 실패: symbol=%s normalized=%s error=%s",
+                symbol,
+                normalized_symbol,
+                exc,
+            )
+
+            return self._get_fallback_quote(
+                normalized_symbol,
+                symbol,
+            )
 
     def get_quote(self, symbol: str) -> QuoteRead:
         return self.get_real_time_quote(symbol)
@@ -369,6 +529,82 @@ class PricePredictor:
         "sample_count": 0,
         "model_beta": None,
     }
+
+    @staticmethod
+    def _multi_features(
+        gdxu_history: deque[QuoteRead],
+        futures_history: deque[QuoteRead],
+        miners_history: deque[QuoteRead],
+        spot_history: deque[QuoteRead],
+        index: int,
+    ) -> list[float] | None:
+
+        periods = [1, 3, 5, 10]
+
+        histories = [
+            gdxu_history,
+            futures_history,
+            miners_history,
+            spot_history,
+        ]
+
+        if any(index >= len(history) for history in histories):
+            return None
+
+        if index < 10:
+            return None
+
+        features: list[float] = []
+
+        # GDXU
+        for period in periods:
+            value = PricePredictor._return(
+                gdxu_history[index].price,
+                gdxu_history[index - period].price,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
+
+        # 금 선물
+        for period in periods:
+            value = PricePredictor._return(
+                futures_history[index].price,
+                futures_history[index - period].price,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
+
+        # 금광 ETF
+        for period in periods:
+            value = PricePredictor._return(
+                miners_history[index].price,
+                miners_history[index - period].price,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
+
+        # ACE KRX금현물 자체 추세
+        for period in periods:
+            value = PricePredictor._return(
+                spot_history[index].price,
+                spot_history[index - period].price,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
+
+        return features
 
     @staticmethod
     def _return(current: Decimal, previous: Decimal) -> float | None:
@@ -727,15 +963,25 @@ class PricePredictor:
         )
 
     @staticmethod
-    def predict_spot_from_etf(
-        etf_history: deque[QuoteRead],
+    def predict_spot_from_market_signals(
+        gdxu_history: deque[QuoteRead],
+        futures_history: deque[QuoteRead],
+        miners_history: deque[QuoteRead],
         spot_history: deque[QuoteRead],
     ) -> tuple[Decimal | None, str, str]:
 
-        if (
-            len(etf_history) < 12
-            or len(spot_history) < 12
-        ):
+        sample_count = min(
+            len(gdxu_history),
+            len(futures_history),
+            len(miners_history),
+            len(spot_history),
+        )
+
+# _multi_features()에서 10-period 수익률을 사용하므로
+# 최소 11개 데이터가 필요하다.
+        MIN_HISTORY_LENGTH = 11
+
+        if sample_count < MIN_HISTORY_LENGTH:
             PricePredictor.last_metrics = {
                 "mae_percent": None,
                 "rmse_percent": None,
@@ -748,139 +994,221 @@ class PricePredictor:
             return (
                 None,
                 "HOLD",
-                "예측을 위해 최소 12개 이상의 GOLD/ETF 데이터가 필요합니다.",
+                f"GDXU, 금선물, 금광, 금현물 데이터가 부족합니다. "
+                f"(현재 {sample_count}개 / 최소 {MIN_HISTORY_LENGTH}개)",
             )
 
-        x_values, y_values = (
-            PricePredictor._build_training_data(
-                etf_history,
+        x_values: list[list[float]] = []
+        y_values: list[float] = []
+
+        # 과거 → 다음 시점 GOLD 수익률 학습
+        for index in range(10, sample_count - 1):
+
+            features = PricePredictor._multi_features(
+                gdxu_history,
+                futures_history,
+                miners_history,
                 spot_history,
+                index,
             )
-        )
+
+            if features is None:
+                continue
+
+            current_price = spot_history[index].price
+            next_price = spot_history[index + 1].price
+
+            target = PricePredictor._return(
+                next_price,
+                current_price,
+            )
+
+            if target is None:
+                continue
+
+            x_values.append(features)
+            y_values.append(target)
 
         if len(x_values) < PricePredictor.MIN_SAMPLES:
             return (
                 None,
                 "HOLD",
-                "회귀모델 학습에 필요한 데이터가 부족합니다.",
+                "GOLD 예측 학습 데이터가 부족합니다.",
             )
 
-        # 최근 WINDOW개 샘플만 사용
-        x_train = x_values[-PricePredictor.WINDOW:]
-        y_train = y_values[-PricePredictor.WINDOW:]
+        # 최근 WINDOW개만 사용
+        x_values = x_values[-PricePredictor.WINDOW:]
+        y_values = y_values[-PricePredictor.WINDOW:]
 
         weights, intercept = PricePredictor._ols_fit(
-            x_train,
-            y_train,
+            x_values,
+            y_values,
         )
 
         if not weights:
             return (
                 None,
                 "HOLD",
-                "회귀모델 계산에 실패했습니다.",
+                "예측 모델 계산에 실패했습니다.",
             )
 
-        # 백테스트 성능
-        PricePredictor.last_metrics = (
-            PricePredictor._calculate_metrics(
-                x_train,
-                y_train,
-                weights,
-                intercept,
-            )
-        )
+        # 최신 feature
+        latest_index = sample_count - 1
 
-        # 현재 시점 feature
-        current_index = min(
-            len(etf_history),
-            len(spot_history),
-        ) - 1
-
-        current_features = PricePredictor._features(
-            etf_history,
+        latest_features = PricePredictor._multi_features(
+            gdxu_history,
+            futures_history,
+            miners_history,
             spot_history,
-            current_index,
+            latest_index,
         )
 
-        if current_features is None:
+        if latest_features is None:
             return (
                 None,
                 "HOLD",
-                "현재 GOLD 예측용 데이터가 부족합니다.",
+                "최신 시장 데이터가 부족합니다.",
             )
 
-        predicted_return = (
-            PricePredictor._predict_with_model(
-                weights,
-                intercept,
-                current_features,
-            )
-        )
+        predicted_return = intercept
+
+        for weight, feature in zip(
+            weights,
+            latest_features,
+        ):
+            predicted_return += weight * feature
 
         spot_last = spot_history[-1].price
 
-        predicted_price = spot_last * (
-            Decimal("1")
-            + Decimal(str(predicted_return))
-        )
+        predicted_price = (
+            spot_last
+            * Decimal(str(1.0 + predicted_return))
+        ).quantize(Decimal("0.01"))
 
-        if predicted_price <= 0:
-            return (
-                None,
-                "HOLD",
-                "비정상적인 예측값이 계산되었습니다.",
+        # --------------------------------------------------
+        # 모델 성능 계산
+        # --------------------------------------------------
+        predictions: list[float] = []
+
+        for features in x_values:
+            prediction = intercept
+
+            for weight, feature in zip(
+                weights,
+                features,
+            ):
+                prediction += weight * feature
+
+            predictions.append(prediction)
+
+        errors = [
+            prediction - actual
+            for prediction, actual in zip(
+                predictions,
+                y_values,
             )
+        ]
 
-        # 과도한 단기 예측 방지
-        predicted_return = max(
-            min(predicted_return, 0.10),
-            -0.10,
+        mae = (
+            sum(abs(error) for error in errors)
+            / len(errors)
         )
 
-        predicted_price = spot_last * (
-            Decimal("1")
-            + Decimal(str(predicted_return))
+        rmse = (
+            sum(error * error for error in errors)
+            / len(errors)
+        ) ** 0.5
+
+        actual_mean = (
+            sum(y_values) / len(y_values)
         )
 
+        ss_total = sum(
+            (actual - actual_mean) ** 2
+            for actual in y_values
+        )
+
+        ss_residual = sum(
+            error * error
+            for error in errors
+        )
+
+        r2 = (
+            1.0 - ss_residual / ss_total
+            if ss_total > 0
+            else 0.0
+        )
+
+        direction_correct = sum(
+            1
+            for prediction, actual in zip(
+                predictions,
+                y_values,
+            )
+            if (
+                prediction >= 0
+                and actual >= 0
+            )
+            or (
+                prediction < 0
+                and actual < 0
+            )
+        )
+
+        direction_accuracy = (
+            direction_correct
+            / len(y_values)
+            * 100
+        )
+
+        PricePredictor.last_metrics = {
+            "mae_percent": round(mae * 100, 4),
+            "rmse_percent": round(rmse * 100, 4),
+            "direction_accuracy": round(
+                direction_accuracy,
+                2,
+            ),
+            "r2": round(r2, 4),
+            "sample_count": len(y_values),
+            "model_beta": round(
+                predicted_return * 100,
+                4,
+            ),
+        }
+
+        # --------------------------------------------------
+        # 추천
+        # --------------------------------------------------
         if predicted_return > 0.001:
             signal = "BUY"
             reason = (
-                f"ETF와 GOLD의 최근 추세를 회귀분석한 결과 "
-                f"{predicted_return * 100:.2f}% 상승이 예상됩니다."
+                "금선물·금광·GDXU의 상승 신호를 종합하면 "
+                "ACE KRX금현물의 추가 상승 가능성이 있습니다."
             )
+
         elif predicted_return < -0.001:
             signal = "SELL"
             reason = (
-                f"ETF와 GOLD의 최근 추세를 회귀분석한 결과 "
-                f"{predicted_return * 100:.2f}% 하락이 예상됩니다."
+                "금선물·금광·GDXU의 하락 신호를 종합하면 "
+                "ACE KRX금현물의 조정 가능성이 있습니다."
             )
+
         else:
             signal = "HOLD"
             reason = (
-                "회귀모델 기준 예상 변동폭이 작아 "
-                "관망이 적절합니다."
+                "금선물·금광·GDXU의 방향성이 뚜렷하지 않아 "
+                "금현물은 관망하는 것이 적절합니다."
             )
 
-        metrics = PricePredictor.last_metrics
-
-        reason += (
-            f" 최근 방향성 적중률 "
-            f"{metrics.get('direction_accuracy')}%, "
-            f"MAE {metrics.get('mae_percent')}%."
-        )
-
-        return (
-            predicted_price.quantize(
-                Decimal("0.01")
-            ),
-            signal,
-            reason,
-        )
-
+        return predicted_price, signal, reason
 
 class MarketScheduler:
-    DEFAULT_SYMBOLS = ["마이크로섹터 금광3배 ETN", "ACE KRX금현물"]
+    DEFAULT_SYMBOLS = [
+        "마이크로섹터 금광3배 ETN",
+        "ACE 골드선물 레버리지",
+        "HANARO 글로벌금채굴기업",
+        "ACE KRX금현물",
+    ]
 
     def __init__(self) -> None:
         raw_symbols = os.getenv("MARKET_POLL_SYMBOLS", ",".join(self.DEFAULT_SYMBOLS))
@@ -921,17 +1249,55 @@ class MarketScheduler:
     def normalize_symbol(self, symbol: str) -> str:
         return self.provider.normalize_symbol(symbol)
 
-    def get_historical_quotes(self, symbol: str, days: int = 30) -> list[QuoteRead]:
+    def get_historical_quotes(
+        self,
+        symbol: str,
+        days: int = 30,
+    ) -> list[QuoteRead]:
+
         normalized_symbol = self.normalize_symbol(symbol)
+
+        yahoo_symbols = {
+            "MICROSECTOR_GOLD3X": "GDXU",
+            "GOLD_FUTURES": "225130.KS",
+            "GOLD_MINERS": "473640.KS",
+            "ACE_KRX_GOLD": "411060.KS",
+        }
+
+        yahoo_symbol = yahoo_symbols.get(normalized_symbol)
+
+        if not yahoo_symbol:
+            logging.warning(
+                "Yahoo historical symbol not found: %s",
+                normalized_symbol,
+            )
+            return []
+
         try:
-            history = self.provider.get_historical_quotes(normalized_symbol, days=days)
-        except Exception:
-            return self._build_synthetic_history(symbol, days)
+            # Yahoo provider는 MarketDataProvider 안에 있음
+            history = self.provider.yahoo_provider.get_historical_quotes(
+                yahoo_symbol,
+                days=days,
+            )
 
-        if len(history) < days:
-            history = self._fill_missing_history(symbol, history, days)
+            return [
+                QuoteRead(
+                    symbol=symbol,
+                    price=quote.price,
+                    timestamp=quote.timestamp,
+                )
+                for quote in history
+            ]
 
-        return history
+        except Exception as exc:
+            logging.warning(
+                "Yahoo historical 조회 실패: symbol=%s yahoo=%s error=%s",
+                symbol,
+                yahoo_symbol,
+                exc,
+            )
+
+            return []
 
     def save_market_quote(self, quote: QuoteRead) -> None:
         db = self.db_session_factory()
@@ -1020,15 +1386,72 @@ class MarketScheduler:
 
     async def load_initial_history(self) -> None:
         self.load_saved_history()
+
+        # 예측 모델이 동작하기 위해 필요한 최소 히스토리
+        min_history_required = 30
+
         for symbol in self.symbols:
             normalized = self.normalize_symbol(symbol)
-            if self.history.get(normalized):
+
+            existing_history = self.history.get(
+                normalized,
+                deque(),
+            )
+
+            # 이미 충분한 데이터가 있으면 추가 조회하지 않음
+            if len(existing_history) >= min_history_required:
                 continue
-            oldest_quotes = self.get_historical_quotes(symbol, days=self.initial_history_days)
+
+            logging.info(
+                "Historical data 보충 시작: symbol=%s existing=%d required=%d",
+                symbol,
+                len(existing_history),
+                min_history_required,
+            )
+
+            historical_quotes = self.get_historical_quotes(
+                symbol,
+                days=self.initial_history_days,
+            )
+
+            if not historical_quotes:
+                logging.warning(
+                    "Historical data 없음: symbol=%s",
+                    symbol,
+                )
+                continue
+
             if normalized not in self.history:
-                self.history[normalized] = deque(maxlen=self.history_maxlen)
-            for quote in oldest_quotes:
-                self.history[normalized].append(quote)
+                self.history[normalized] = deque(
+                    maxlen=self.history_maxlen
+                )
+
+            # 기존 데이터와 과거 데이터를 합친 후
+            # timestamp 기준으로 정렬
+            merged: dict[datetime, QuoteRead] = {}
+
+            for quote in historical_quotes:
+                merged[quote.timestamp] = quote
+
+            for quote in existing_history:
+                merged[quote.timestamp] = quote
+
+            sorted_quotes = sorted(
+                merged.values(),
+                key=lambda quote: quote.timestamp,
+            )
+
+            self.history[normalized] = deque(
+                sorted_quotes,
+                maxlen=self.history_maxlen,
+            )
+
+            logging.info(
+                "Historical data 보충 완료: symbol=%s before=%d after=%d",
+                symbol,
+                len(existing_history),
+                len(self.history[normalized]),
+            )
 
     def get_dashboard_data(self) -> dict[str, object]:
         fx_rate = self.provider.get_fx_rate()
@@ -1059,14 +1482,56 @@ class MarketScheduler:
         prediction_symbol = "ACE KRX금현물"
         normalized = self.normalize_symbol(prediction_symbol)
         history = self.history.get(normalized, deque())
-        gold_history = self.history.get(gold_alias, deque())
-        predicted_price, signal, reason = PricePredictor.predict_spot_from_etf(gold_history, history)
+        gold_history = self.history.get(
+            gold_alias,
+            deque(),
+        )
+
+        futures_alias = self.provider.normalize_symbol(
+            "ACE 골드선물 레버리지"
+        )
+
+        miners_alias = self.provider.normalize_symbol(
+            "HANARO 글로벌금채굴기업"
+        )
+
+        futures_history = self.history.get(
+            futures_alias,
+            deque(),
+        )
+
+        miners_history = self.history.get(
+            miners_alias,
+            deque(),
+        )
+
+        print(
+            "HISTORY LENGTH:",
+            "GDXU=", len(gold_history),
+            "FUTURES=", len(futures_history),
+            "MINERS=", len(miners_history),
+            "ACE=", len(history),
+        )
+
+        predicted_price, signal, reason = (
+            PricePredictor.predict_spot_from_market_signals(
+                gold_history,
+                futures_history,
+                miners_history,
+                history,
+            )
+        )
+
+        # 예측값을 차트에 표시하기 위한 미래 시점 데이터
         future_point = None
+
         if predicted_price is not None and history:
             future_point = {
                 "symbol": prediction_symbol,
                 "price": float(predicted_price),
-                "timestamp": (history[-1].timestamp + timedelta(days=1)).isoformat(),
+                "timestamp": (
+                    history[-1].timestamp + timedelta(days=1)
+                ).isoformat(),
             }
 
         latest_quotes = {}
