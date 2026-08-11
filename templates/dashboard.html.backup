@@ -70,39 +70,6 @@
       padding: 12px 8px;
       border-radius: 12px;
     }
-    .prediction-metrics {
-      display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 8px;
-      margin-top: 12px;
-    }
-
-    .metric-item {
-      padding: 10px 6px;
-      border-radius: 8px;
-      background: #0b1220;
-      border: 1px solid #2f3542;
-      text-align: center;
-    }
-
-    .metric-label {
-      display: block;
-      font-size: 11px;
-      color: #94a3b8;
-      margin-bottom: 5px;
-    }
-
-    .metric-item strong {
-      display: block;
-      font-size: 15px;
-      color: #f8f9fa;
-    }
-
-    @media (max-width: 900px) {
-      .prediction-metrics {
-        grid-template-columns: repeat(2, 1fr);
-      }
-    }
     .gap-card {
       flex: 0 0 260px;
       background: transparent;
@@ -158,33 +125,6 @@
       <div class="chart-card">
         <h2>ACE KRX금현물 예측</h2>
         <canvas id="predictionChart"></canvas>
-
-        <div class="prediction-metrics">
-          <div class="metric-item">
-            <span class="metric-label">방향성 적중률</span>
-            <strong id="directionAccuracy">-</strong>
-          </div>
-
-          <div class="metric-item">
-            <span class="metric-label">MAE</span>
-            <strong id="modelMae">-</strong>
-          </div>
-
-          <div class="metric-item">
-            <span class="metric-label">RMSE</span>
-            <strong id="modelRmse">-</strong>
-          </div>
-
-          <div class="metric-item">
-            <span class="metric-label">R²</span>
-            <strong id="modelR2">-</strong>
-          </div>
-
-          <div class="metric-item">
-            <span class="metric-label">학습 샘플</span>
-            <strong id="modelSamples">-</strong>
-          </div>
-        </div>
       </div>
       <div class="gap-card">
         <h2>갭% 추이</h2>
@@ -441,33 +381,6 @@
         predictionChart.data.datasets[0].data = predictionData;
         predictionChart.data.datasets[1].data = predictionPoint;
         predictionChart.update();
-
-        const metrics = data.prediction?.model_metrics || {};
-
-        document.getElementById('directionAccuracy').textContent =
-          metrics.direction_accuracy != null
-            ? `${metrics.direction_accuracy}%`
-            : '-';
-
-        document.getElementById('modelMae').textContent =
-          metrics.mae_percent != null
-            ? `${metrics.mae_percent}%`
-            : '-';
-
-        document.getElementById('modelRmse').textContent =
-          metrics.rmse_percent != null
-            ? `${metrics.rmse_percent}%`
-            : '-';
-
-        document.getElementById('modelR2').textContent =
-          metrics.r2 != null
-            ? metrics.r2
-            : '-';
-
-        document.getElementById('modelSamples').textContent =
-          metrics.sample_count != null
-            ? metrics.sample_count
-            : '-';
 
         if (microData.length) {
           const fxRate = data.fx_rate.toLocaleString(undefined, { maximumFractionDigits: 2 });
