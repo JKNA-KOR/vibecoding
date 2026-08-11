@@ -344,57 +344,539 @@ class MarketAnalyzer:
 
 
 class PricePredictor:
+    """
+    GOLD 예측 모델.
+
+    기존:
+        ETF 최근 수익률 / 3
+        -> KRX GOLD 예측
+
+    개선:
+        ETF/GOLD의 여러 기간 수익률을 이용한
+        Rolling Ordinary Least Squares 회귀.
+
+    외부 ML 라이브러리 없이 순수 Python으로 구현한다.
+    """
+
+    WINDOW = 30
+    MIN_SAMPLES = 8
+
+    last_metrics: dict[str, float | int | None] = {
+        "mae_percent": None,
+        "rmse_percent": None,
+        "direction_accuracy": None,
+        "r2": None,
+        "sample_count": 0,
+        "model_beta": None,
+    }
+
     @staticmethod
-    def predict_price(history: deque[QuoteRead]) -> tuple[Decimal | None, str, str]:
+    def _return(current: Decimal, previous: Decimal) -> float | None:
+        if previous == 0:
+            return None
+        return float((current - previous) / previous)
+
+    @staticmethod
+    def _mean(values: list[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    @staticmethod
+    def _ols_fit(
+        x_values: list[list[float]],
+        y_values: list[float],
+    ) -> tuple[list[float], float]:
+        """
+        다변량 OLS.
+
+        X = [1, feature1, feature2, ...]
+        y = target
+
+        정규방정식:
+            beta = (X'X)^-1 X'y
+
+        외부 라이브러리 없이 Gaussian elimination 사용.
+        """
+
+        if not x_values or not y_values:
+            return [], 0.0
+
+        feature_count = len(x_values[0])
+
+        # X에 intercept 추가
+        matrix = []
+
+        for x, y in zip(x_values, y_values):
+            row = [1.0] + list(x)
+            matrix.append(row + [y])
+
+        n = feature_count + 1
+
+        # X'X
+        xtx = [[0.0 for _ in range(n)] for _ in range(n)]
+        xty = [0.0 for _ in range(n)]
+
+        for row in matrix:
+            x = row[:n]
+            y = row[n]
+
+            for i in range(n):
+                xty[i] += x[i] * y
+
+                for j in range(n):
+                    xtx[i][j] += x[i] * x[j]
+
+        # 작은 ridge 값으로 singular matrix 방지
+        ridge = 1e-10
+
+        for i in range(n):
+            xtx[i][i] += ridge
+
+        # Augmented matrix
+        aug = [
+            xtx[i] + [xty[i]]
+            for i in range(n)
+        ]
+
+        # Gaussian elimination
+        for col in range(n):
+            pivot = max(
+                range(col, n),
+                key=lambda r: abs(aug[r][col])
+            )
+
+            if abs(aug[pivot][col]) < 1e-12:
+                return [], 0.0
+
+            aug[col], aug[pivot] = aug[pivot], aug[col]
+
+            pivot_value = aug[col][col]
+
+            for j in range(col, n + 1):
+                aug[col][j] /= pivot_value
+
+            for row in range(n):
+                if row == col:
+                    continue
+
+                factor = aug[row][col]
+
+                for j in range(col, n + 1):
+                    aug[row][j] -= factor * aug[col][j]
+
+        coefficients = [
+            aug[i][n]
+            for i in range(n)
+        ]
+
+        intercept = coefficients[0]
+        weights = coefficients[1:]
+
+        return weights, intercept
+
+    @staticmethod
+    def _features(
+        etf_history: deque[QuoteRead],
+        spot_history: deque[QuoteRead],
+        index: int,
+    ) -> list[float] | None:
+        """
+        특정 index 시점에서 사용할 feature.
+
+        feature:
+            ETF 1-period return
+            ETF 5-period return
+            ETF 10-period return
+            GOLD 1-period return
+            GOLD 5-period return
+            GOLD 10-period return
+        """
+
+        periods = [1, 5, 10]
+
+        if index < 10:
+            return None
+
+        if index >= len(etf_history) or index >= len(spot_history):
+            return None
+
+        features: list[float] = []
+
+        etf_current = etf_history[index].price
+        spot_current = spot_history[index].price
+
+        for period in periods:
+            etf_previous = etf_history[index - period].price
+            value = PricePredictor._return(
+                etf_current,
+                etf_previous,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
+
+        for period in periods:
+            spot_previous = spot_history[index - period].price
+            value = PricePredictor._return(
+                spot_current,
+                spot_previous,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
+
+        return features
+
+    @staticmethod
+    def _build_training_data(
+        etf_history: deque[QuoteRead],
+        spot_history: deque[QuoteRead],
+    ) -> tuple[list[list[float]], list[float]]:
+
+        sample_count = min(
+            len(etf_history),
+            len(spot_history),
+        )
+
+        if sample_count < 12:
+            return [], []
+
+        x_values: list[list[float]] = []
+        y_values: list[float] = []
+
+        # 과거 데이터를 이용해
+        # "현재 feature -> 다음 GOLD 수익률" 학습
+        for index in range(10, sample_count - 1):
+
+            features = PricePredictor._features(
+                etf_history,
+                spot_history,
+                index,
+            )
+
+            if features is None:
+                continue
+
+            current_price = spot_history[index].price
+            next_price = spot_history[index + 1].price
+
+            target = PricePredictor._return(
+                next_price,
+                current_price,
+            )
+
+            if target is None:
+                continue
+
+            x_values.append(features)
+            y_values.append(target)
+
+        return x_values, y_values
+
+    @staticmethod
+    def _predict_with_model(
+        weights: list[float],
+        intercept: float,
+        features: list[float],
+    ) -> float:
+
+        return intercept + sum(
+            weight * feature
+            for weight, feature in zip(weights, features)
+        )
+
+    @staticmethod
+    def _calculate_metrics(
+        x_values: list[list[float]],
+        y_values: list[float],
+        weights: list[float],
+        intercept: float,
+    ) -> dict[str, float | int | None]:
+
+        if not y_values:
+            return {
+                "mae_percent": None,
+                "rmse_percent": None,
+                "direction_accuracy": None,
+                "r2": None,
+                "sample_count": 0,
+                "model_beta": None,
+            }
+
+        predictions = [
+            PricePredictor._predict_with_model(
+                weights,
+                intercept,
+                x,
+            )
+            for x in x_values
+        ]
+
+        errors = [
+            predicted - actual
+            for predicted, actual
+            in zip(predictions, y_values)
+        ]
+
+        mae = PricePredictor._mean(
+            [abs(error) for error in errors]
+        )
+
+        rmse = (
+            PricePredictor._mean(
+                [error * error for error in errors]
+            )
+            ** 0.5
+        )
+
+        actual_mean = PricePredictor._mean(y_values)
+
+        ss_total = sum(
+            (actual - actual_mean) ** 2
+            for actual in y_values
+        )
+
+        ss_residual = sum(
+            error * error
+            for error in errors
+        )
+
+        if ss_total > 0:
+            r2 = 1.0 - (ss_residual / ss_total)
+        else:
+            r2 = None
+
+        correct = 0
+
+        for predicted, actual in zip(
+            predictions,
+            y_values,
+        ):
+            if (
+                predicted > 0
+                and actual > 0
+            ) or (
+                predicted < 0
+                and actual < 0
+            ) or (
+                abs(predicted) < 1e-12
+                and abs(actual) < 1e-12
+            ):
+                correct += 1
+
+        direction_accuracy = (
+            correct / len(y_values)
+            if y_values
+            else None
+        )
+
+        return {
+            "mae_percent": round(mae * 100, 4),
+            "rmse_percent": round(rmse * 100, 4),
+            "direction_accuracy": round(
+                direction_accuracy * 100,
+                2,
+            ) if direction_accuracy is not None else None,
+            "r2": round(r2, 4) if r2 is not None else None,
+            "sample_count": len(y_values),
+            "model_beta": round(
+                weights[0],
+                6,
+            ) if weights else None,
+        }
+
+    @staticmethod
+    def predict_price(
+        history: deque[QuoteRead],
+    ) -> tuple[Decimal | None, str, str]:
+
         if len(history) < 2:
             return None, "HOLD", "가격 히스토리가 부족해 예측이 불가합니다."
 
         last_price = history[-1].price
         previous_price = history[-2].price
+
         if previous_price == 0:
             return None, "HOLD", "이전 가격 데이터가 유효하지 않습니다."
 
-        change = (last_price - previous_price) / previous_price
-        predicted_price = last_price * (Decimal("1.0") + change)
+        change = (
+            last_price - previous_price
+        ) / previous_price
+
+        predicted_price = (
+            last_price * (Decimal("1.0") + change)
+        )
 
         if change > Decimal("0.001"):
             signal = "BUY"
-            reason = "최근 상승 추세가 계속되면 추가 매수 기회가 될 수 있습니다."
+            reason = "최근 상승 추세가 계속되면 추가 상승 가능성이 있습니다."
         elif change < Decimal("-0.001"):
             signal = "SELL"
-            reason = "최근 하락 추세가 계속되면 매도 검토가 필요합니다."
+            reason = "최근 하락 추세가 계속되면 조정 가능성이 있습니다."
         else:
             signal = "HOLD"
-            reason = "가격 변동이 작아 관망이 타당합니다."
+            reason = "가격 변동이 작아 관망이 적절합니다."
 
-        return predicted_price.quantize(Decimal("0.01")), signal, reason
+        return (
+            predicted_price.quantize(Decimal("0.01")),
+            signal,
+            reason,
+        )
 
     @staticmethod
-    def predict_spot_from_etf(etf_history: deque[QuoteRead], spot_history: deque[QuoteRead]) -> tuple[Decimal | None, str, str]:
-        if len(etf_history) < 2 or len(spot_history) < 1:
-            return None, "HOLD", "금광 ETN과 금현물 가격 데이터가 충분하지 않습니다."
+    def predict_spot_from_etf(
+        etf_history: deque[QuoteRead],
+        spot_history: deque[QuoteRead],
+    ) -> tuple[Decimal | None, str, str]:
 
-        etf_last = etf_history[-1].price
-        etf_prev = etf_history[-2].price
+        if (
+            len(etf_history) < 12
+            or len(spot_history) < 12
+        ):
+            PricePredictor.last_metrics = {
+                "mae_percent": None,
+                "rmse_percent": None,
+                "direction_accuracy": None,
+                "r2": None,
+                "sample_count": 0,
+                "model_beta": None,
+            }
+
+            return (
+                None,
+                "HOLD",
+                "예측을 위해 최소 12개 이상의 GOLD/ETF 데이터가 필요합니다.",
+            )
+
+        x_values, y_values = (
+            PricePredictor._build_training_data(
+                etf_history,
+                spot_history,
+            )
+        )
+
+        if len(x_values) < PricePredictor.MIN_SAMPLES:
+            return (
+                None,
+                "HOLD",
+                "회귀모델 학습에 필요한 데이터가 부족합니다.",
+            )
+
+        # 최근 WINDOW개 샘플만 사용
+        x_train = x_values[-PricePredictor.WINDOW:]
+        y_train = y_values[-PricePredictor.WINDOW:]
+
+        weights, intercept = PricePredictor._ols_fit(
+            x_train,
+            y_train,
+        )
+
+        if not weights:
+            return (
+                None,
+                "HOLD",
+                "회귀모델 계산에 실패했습니다.",
+            )
+
+        # 백테스트 성능
+        PricePredictor.last_metrics = (
+            PricePredictor._calculate_metrics(
+                x_train,
+                y_train,
+                weights,
+                intercept,
+            )
+        )
+
+        # 현재 시점 feature
+        current_index = min(
+            len(etf_history),
+            len(spot_history),
+        ) - 1
+
+        current_features = PricePredictor._features(
+            etf_history,
+            spot_history,
+            current_index,
+        )
+
+        if current_features is None:
+            return (
+                None,
+                "HOLD",
+                "현재 GOLD 예측용 데이터가 부족합니다.",
+            )
+
+        predicted_return = (
+            PricePredictor._predict_with_model(
+                weights,
+                intercept,
+                current_features,
+            )
+        )
+
         spot_last = spot_history[-1].price
 
-        if etf_prev == 0 or spot_last == 0:
-            return None, "HOLD", "이전 가격 데이터가 유효하지 않습니다."
+        predicted_price = spot_last * (
+            Decimal("1")
+            + Decimal(str(predicted_return))
+        )
 
-        etf_delta = (etf_last - etf_prev) / etf_prev
-        predicted_price = spot_last * (Decimal("1.0") + etf_delta / Decimal("3"))
+        if predicted_price <= 0:
+            return (
+                None,
+                "HOLD",
+                "비정상적인 예측값이 계산되었습니다.",
+            )
 
-        if etf_delta > Decimal("0.001"):
+        # 과도한 단기 예측 방지
+        predicted_return = max(
+            min(predicted_return, 0.10),
+            -0.10,
+        )
+
+        predicted_price = spot_last * (
+            Decimal("1")
+            + Decimal(str(predicted_return))
+        )
+
+        if predicted_return > 0.001:
             signal = "BUY"
-            reason = "금광3배 ETN이 선행 상승 신호를 보여 금현물 상승 가능성이 높아 보입니다."
-        elif etf_delta < Decimal("-0.001"):
+            reason = (
+                f"ETF와 GOLD의 최근 추세를 회귀분석한 결과 "
+                f"{predicted_return * 100:.2f}% 상승이 예상됩니다."
+            )
+        elif predicted_return < -0.001:
             signal = "SELL"
-            reason = "금광3배 ETN이 선행 하락 신호를 보여 금현물 조정 가능성이 높아 보입니다."
+            reason = (
+                f"ETF와 GOLD의 최근 추세를 회귀분석한 결과 "
+                f"{predicted_return * 100:.2f}% 하락이 예상됩니다."
+            )
         else:
             signal = "HOLD"
-            reason = "금광3배 ETN의 움직임이 약해 금현물 관망이 유효합니다."
+            reason = (
+                "회귀모델 기준 예상 변동폭이 작아 "
+                "관망이 적절합니다."
+            )
 
-        return predicted_price.quantize(Decimal("0.01")), signal, reason
+        metrics = PricePredictor.last_metrics
+
+        reason += (
+            f" 최근 방향성 적중률 "
+            f"{metrics.get('direction_accuracy')}%, "
+            f"MAE {metrics.get('mae_percent')}%."
+        )
+
+        return (
+            predicted_price.quantize(
+                Decimal("0.01")
+            ),
+            signal,
+            reason,
+        )
 
 
 class MarketScheduler:
@@ -665,7 +1147,9 @@ class MarketScheduler:
                 "gap_percent": gap_percent,
                 "gap_description": gap_description,
                 "gap_thresholds": {"positive": float(pos_thresh), "negative_abs": float(neg_thresh_abs)},
+                "model_metrics": PricePredictor.last_metrics,
             },
+        
             # gap time series for charting
             "gap_series": self._build_gap_series(gold_history, history),
             "predicted_gap_point": self._build_predicted_gap_point(gold_history, history, predicted_price, future_point, latest_quotes),
