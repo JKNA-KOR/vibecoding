@@ -232,9 +232,9 @@ class MarketDataProvider:
     }
 
     FALLBACK_PRICES: dict[str, Decimal] = {
-        "MICROSECTOR_GOLD3X": Decimal("15200.00"),
-        "ACE_KRX_GOLD": Decimal("62000.00"),
-        "KODEXGOLD": Decimal("500.00"),
+    "MICROSECTOR_GOLD3X": None,
+    "ACE_KRX_GOLD": None,
+    "KODEXGOLD": None,
     }
 
     def __init__(self) -> None:
