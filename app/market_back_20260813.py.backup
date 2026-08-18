@@ -505,47 +505,23 @@ class MarketAnalyzer:
 
 class PricePredictor:
     """
-    GOLD 다중 시간축 예측 모델.
+    GOLD 예측 모델.
 
-    - 단기: 약 3시간 후
-    - 중기: 약 3거래일 후
-    - 장기: 약 30일 후
+    기존:
+        ETF 최근 수익률 / 3
+        -> KRX GOLD 예측
 
-    네 가지 시장 데이터(GDXU, 국내 금선물, 금광 ETF, ACE KRX금현물)의
-    수익률/추세를 입력으로 사용한다.
+    개선:
+        ETF/GOLD의 여러 기간 수익률을 이용한
+        Rolling Ordinary Least Squares 회귀.
 
-    외부 ML 라이브러리 없이 순수 Python OLS + 추세 보정으로 동작한다.
-    데이터가 충분하면 "과거 동일 horizon의 실제 수익률"을 학습하고,
-    장기 horizon에 필요한 데이터가 아직 충분하지 않으면 최근 추세를
-    외삽하되 confidence를 낮춘다.
+    외부 ML 라이브러리 없이 순수 Python으로 구현한다.
     """
 
-    WINDOW = 180
-    MIN_SAMPLES = 12
-    FEATURE_PERIODS = [1, 3, 5, 10]
+    WINDOW = 30
+    MIN_SAMPLES = 8
 
-    HORIZONS = {
-        "short": {
-            "label": "단기",
-            "hours": 3,
-            "days": 0.125,
-            "description": "약 3시간 후 단타 추세",
-        },
-        "medium": {
-            "label": "중기",
-            "hours": 72,
-            "days": 3,
-            "description": "약 3일 후 스윙 추세",
-        },
-        "long": {
-            "label": "장기",
-            "hours": 720,
-            "days": 30,
-            "description": "약 30일 후 중장기 추세",
-        },
-    }
-
-    last_metrics: dict[str, Any] = {
+    last_metrics: dict[str, float | int | None] = {
         "mae_percent": None,
         "rmse_percent": None,
         "direction_accuracy": None,
@@ -554,7 +530,81 @@ class PricePredictor:
         "model_beta": None,
     }
 
-    last_multi_prediction: dict[str, Any] = {}
+    @staticmethod
+    def _multi_features(
+        gdxu_history: deque[QuoteRead],
+        futures_history: deque[QuoteRead],
+        miners_history: deque[QuoteRead],
+        spot_history: deque[QuoteRead],
+        index: int,
+    ) -> list[float] | None:
+
+        periods = [1, 3, 5, 10]
+
+        histories = [
+            gdxu_history,
+            futures_history,
+            miners_history,
+            spot_history,
+        ]
+
+        if any(index >= len(history) for history in histories):
+            return None
+
+        if index < 10:
+            return None
+
+        features: list[float] = []
+
+        # GDXU
+        for period in periods:
+            value = PricePredictor._return(
+                gdxu_history[index].price,
+                gdxu_history[index - period].price,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
+
+        # 금 선물
+        for period in periods:
+            value = PricePredictor._return(
+                futures_history[index].price,
+                futures_history[index - period].price,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
+
+        # 금광 ETF
+        for period in periods:
+            value = PricePredictor._return(
+                miners_history[index].price,
+                miners_history[index - period].price,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
+
+        # ACE KRX금현물 자체 추세
+        for period in periods:
+            value = PricePredictor._return(
+                spot_history[index].price,
+                spot_history[index - period].price,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
+
+        return features
 
     @staticmethod
     def _return(current: Decimal, previous: Decimal) -> float | None:
@@ -567,53 +617,74 @@ class PricePredictor:
         return sum(values) / len(values) if values else 0.0
 
     @staticmethod
-    def _median(values: list[float]) -> float:
-        if not values:
-            return 0.0
-        ordered = sorted(values)
-        middle = len(ordered) // 2
-        if len(ordered) % 2:
-            return ordered[middle]
-        return (ordered[middle - 1] + ordered[middle]) / 2.0
-
-    @staticmethod
     def _ols_fit(
         x_values: list[list[float]],
         y_values: list[float],
     ) -> tuple[list[float], float]:
+        """
+        다변량 OLS.
+
+        X = [1, feature1, feature2, ...]
+        y = target
+
+        정규방정식:
+            beta = (X'X)^-1 X'y
+
+        외부 라이브러리 없이 Gaussian elimination 사용.
+        """
+
         if not x_values or not y_values:
             return [], 0.0
 
         feature_count = len(x_values[0])
-        n = feature_count + 1
 
-        xtx = [[0.0 for _ in range(n)] for _ in range(n)]
-        xty = [0.0 for _ in range(n)]
+        # X에 intercept 추가
+        matrix = []
 
         for x, y in zip(x_values, y_values):
             row = [1.0] + list(x)
-            for i in range(n):
-                xty[i] += row[i] * y
-                for j in range(n):
-                    xtx[i][j] += row[i] * row[j]
+            matrix.append(row + [y])
 
-        # 수치적으로 거의 같은 feature가 있을 때 singular matrix 방지
-        ridge = 1e-8
+        n = feature_count + 1
+
+        # X'X
+        xtx = [[0.0 for _ in range(n)] for _ in range(n)]
+        xty = [0.0 for _ in range(n)]
+
+        for row in matrix:
+            x = row[:n]
+            y = row[n]
+
+            for i in range(n):
+                xty[i] += x[i] * y
+
+                for j in range(n):
+                    xtx[i][j] += x[i] * x[j]
+
+        # 작은 ridge 값으로 singular matrix 방지
+        ridge = 1e-10
+
         for i in range(n):
             xtx[i][i] += ridge
 
-        aug = [xtx[i] + [xty[i]] for i in range(n)]
+        # Augmented matrix
+        aug = [
+            xtx[i] + [xty[i]]
+            for i in range(n)
+        ]
 
+        # Gaussian elimination
         for col in range(n):
             pivot = max(
                 range(col, n),
-                key=lambda r: abs(aug[r][col]),
+                key=lambda r: abs(aug[r][col])
             )
 
             if abs(aug[pivot][col]) < 1e-12:
                 return [], 0.0
 
             aug[col], aug[pivot] = aug[pivot], aug[col]
+
             pivot_value = aug[col][col]
 
             for j in range(col, n + 1):
@@ -624,190 +695,100 @@ class PricePredictor:
                     continue
 
                 factor = aug[row][col]
+
                 for j in range(col, n + 1):
                     aug[row][j] -= factor * aug[col][j]
 
-        coefficients = [aug[i][n] for i in range(n)]
-        return coefficients[1:], coefficients[0]
+        coefficients = [
+            aug[i][n]
+            for i in range(n)
+        ]
+
+        intercept = coefficients[0]
+        weights = coefficients[1:]
+
+        return weights, intercept
 
     @staticmethod
-    def _multi_features(
-        gdxu_history: deque[QuoteRead],
-        futures_history: deque[QuoteRead],
-        miners_history: deque[QuoteRead],
+    def _features(
+        etf_history: deque[QuoteRead],
         spot_history: deque[QuoteRead],
         index: int,
     ) -> list[float] | None:
-        histories = [
-            gdxu_history,
-            futures_history,
-            miners_history,
-            spot_history,
-        ]
+        """
+        특정 index 시점에서 사용할 feature.
 
-        if any(index >= len(history) for history in histories):
+        feature:
+            ETF 1-period return
+            ETF 5-period return
+            ETF 10-period return
+            GOLD 1-period return
+            GOLD 5-period return
+            GOLD 10-period return
+        """
+
+        periods = [1, 5, 10]
+
+        if index < 10:
             return None
 
-        if index < max(PricePredictor.FEATURE_PERIODS):
+        if index >= len(etf_history) or index >= len(spot_history):
             return None
 
         features: list[float] = []
 
-        for current_history in histories:
-            current = current_history[index].price
+        etf_current = etf_history[index].price
+        spot_current = spot_history[index].price
 
-            for period in PricePredictor.FEATURE_PERIODS:
-                value = PricePredictor._return(
-                    current,
-                    current_history[index - period].price,
-                )
-                if value is None:
-                    return None
-                features.append(value)
+        for period in periods:
+            etf_previous = etf_history[index - period].price
+            value = PricePredictor._return(
+                etf_current,
+                etf_previous,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
+
+        for period in periods:
+            spot_previous = spot_history[index - period].price
+            value = PricePredictor._return(
+                spot_current,
+                spot_previous,
+            )
+
+            if value is None:
+                return None
+
+            features.append(value)
 
         return features
 
     @staticmethod
-    def _predict_with_model(
-        weights: list[float],
-        intercept: float,
-        features: list[float],
-    ) -> float:
-        return intercept + sum(
-            weight * feature
-            for weight, feature in zip(weights, features)
-        )
-
-    @staticmethod
-    def _calculate_metrics(
-        x_values: list[list[float]],
-        y_values: list[float],
-        weights: list[float],
-        intercept: float,
-    ) -> dict[str, float | int | None]:
-        if not y_values:
-            return {
-                "mae_percent": None,
-                "rmse_percent": None,
-                "direction_accuracy": None,
-                "r2": None,
-                "sample_count": 0,
-                "model_beta": None,
-            }
-
-        predictions = [
-            PricePredictor._predict_with_model(weights, intercept, x)
-            for x in x_values
-        ]
-
-        errors = [
-            predicted - actual
-            for predicted, actual in zip(predictions, y_values)
-        ]
-
-        mae = PricePredictor._mean([abs(error) for error in errors])
-        rmse = (
-            PricePredictor._mean([error * error for error in errors]) ** 0.5
-        )
-
-        actual_mean = PricePredictor._mean(y_values)
-        ss_total = sum(
-            (actual - actual_mean) ** 2
-            for actual in y_values
-        )
-        ss_residual = sum(error * error for error in errors)
-        r2 = 1.0 - (ss_residual / ss_total) if ss_total > 0 else None
-
-        correct = 0
-        for predicted, actual in zip(predictions, y_values):
-            if (
-                (predicted > 0 and actual > 0)
-                or (predicted < 0 and actual < 0)
-                or (
-                    abs(predicted) < 1e-12
-                    and abs(actual) < 1e-12
-                )
-            ):
-                correct += 1
-
-        direction_accuracy = (
-            correct / len(y_values) * 100
-            if y_values
-            else None
-        )
-
-        return {
-            "mae_percent": round(mae * 100, 4),
-            "rmse_percent": round(rmse * 100, 4),
-            "direction_accuracy": round(direction_accuracy, 2)
-            if direction_accuracy is not None
-            else None,
-            "r2": round(r2, 4) if r2 is not None else None,
-            "sample_count": len(y_values),
-            "model_beta": round(weights[0], 6) if weights else None,
-        }
-
-    @staticmethod
-    def _estimate_step_seconds(
-        history: deque[QuoteRead],
-    ) -> float:
-        if len(history) < 3:
-            return 60.0
-
-        intervals: list[float] = []
-        recent = list(history)[-20:]
-
-        for previous, current in zip(recent, recent[1:]):
-            seconds = (
-                current.timestamp - previous.timestamp
-            ).total_seconds()
-
-            if 1 <= seconds <= 86400:
-                intervals.append(seconds)
-
-        return PricePredictor._median(intervals) or 60.0
-
-    @staticmethod
-    def _horizon_steps(
-        history: deque[QuoteRead],
-        hours: float,
-    ) -> int:
-        step_seconds = PricePredictor._estimate_step_seconds(history)
-        return max(1, int(round(hours * 3600 / step_seconds)))
-
-    @staticmethod
     def _build_training_data(
-        gdxu_history: deque[QuoteRead],
-        futures_history: deque[QuoteRead],
-        miners_history: deque[QuoteRead],
+        etf_history: deque[QuoteRead],
         spot_history: deque[QuoteRead],
-        horizon_steps: int,
     ) -> tuple[list[list[float]], list[float]]:
+
         sample_count = min(
-            len(gdxu_history),
-            len(futures_history),
-            len(miners_history),
+            len(etf_history),
             len(spot_history),
         )
 
-        max_feature_period = max(PricePredictor.FEATURE_PERIODS)
-
-        if sample_count <= max_feature_period + horizon_steps:
+        if sample_count < 12:
             return [], []
 
         x_values: list[list[float]] = []
         y_values: list[float] = []
 
-        last_training_index = sample_count - horizon_steps - 1
+        # 과거 데이터를 이용해
+        # "현재 feature -> 다음 GOLD 수익률" 학습
+        for index in range(10, sample_count - 1):
 
-        for index in range(
-            max_feature_period,
-            last_training_index + 1,
-        ):
-            features = PricePredictor._multi_features(
-                gdxu_history,
-                futures_history,
-                miners_history,
+            features = PricePredictor._features(
+                etf_history,
                 spot_history,
                 index,
             )
@@ -816,10 +797,10 @@ class PricePredictor:
                 continue
 
             current_price = spot_history[index].price
-            future_price = spot_history[index + horizon_steps].price
+            next_price = spot_history[index + 1].price
 
             target = PricePredictor._return(
-                future_price,
+                next_price,
                 current_price,
             )
 
@@ -832,218 +813,27 @@ class PricePredictor:
         return x_values, y_values
 
     @staticmethod
-    def _trend_fallback(
-        gdxu_history: deque[QuoteRead],
-        futures_history: deque[QuoteRead],
-        miners_history: deque[QuoteRead],
-        spot_history: deque[QuoteRead],
-        horizon_steps: int,
-    ) -> tuple[float, dict[str, float]]:
-        """
-        장기 데이터가 아직 충분하지 않을 때 사용하는 보수적 추세 외삽.
+    def _predict_with_model(
+        weights: list[float],
+        intercept: float,
+        features: list[float],
+    ) -> float:
 
-        각 지표의 최근 추세를 계산한 뒤:
-        - GDXU 30%
-        - 금선물 30%
-        - 금광 20%
-        - ACE 현물 20%
-        로 합성한다.
-
-        장기 horizon일수록 단순 선형 외삽 폭주를 막기 위해
-        sqrt(time) 형태로 감쇠한다.
-        """
-        histories = [
-            gdxu_history,
-            futures_history,
-            miners_history,
-            spot_history,
-        ]
-        weights = [0.30, 0.30, 0.20, 0.20]
-
-        available = min(len(history) for history in histories)
-        if available < 2:
-            return 0.0, {
-                "gdxu": 0.0,
-                "futures": 0.0,
-                "miners": 0.0,
-                "spot": 0.0,
-            }
-
-        lookback = min(30, available - 1)
-        component_returns: list[float] = []
-
-        for history in histories:
-            value = PricePredictor._return(
-                history[-1].price,
-                history[-1 - lookback].price,
-            )
-            component_returns.append(value or 0.0)
-
-        base_period = max(1, lookback)
-        scale = (max(horizon_steps, 1) / base_period) ** 0.5
-
-        # 장기 외삽 폭주 방지: horizon return ±12% 이내
-        projected = sum(
-            weight * component
-            for weight, component in zip(weights, component_returns)
-        ) * scale
-
-        projected = max(-0.12, min(0.12, projected))
-
-        return projected, {
-            "gdxu": round(component_returns[0] * 100, 4),
-            "futures": round(component_returns[1] * 100, 4),
-            "miners": round(component_returns[2] * 100, 4),
-            "spot": round(component_returns[3] * 100, 4),
-        }
-
-    @staticmethod
-    def _signal_from_return(predicted_return: float) -> str:
-        if predicted_return >= 0.002:
-            return "BUY"
-        if predicted_return <= -0.002:
-            return "SELL"
-        return "HOLD"
-
-    @staticmethod
-    def _confidence(
-        metrics: dict[str, Any],
-        predicted_return: float,
-        training_mode: str,
-    ) -> str:
-        direction = metrics.get("direction_accuracy")
-        r2 = metrics.get("r2")
-        samples = metrics.get("sample_count", 0) or 0
-
-        if training_mode != "ols":
-            return "LOW"
-
-        score = 0
-
-        if direction is not None:
-            if direction >= 70:
-                score += 2
-            elif direction >= 55:
-                score += 1
-
-        if r2 is not None:
-            if r2 >= 0.50:
-                score += 2
-            elif r2 >= 0.20:
-                score += 1
-
-        if samples >= 50:
-            score += 2
-        elif samples >= 20:
-            score += 1
-
-        if abs(predicted_return) >= 0.005:
-            score += 1
-
-        if score >= 5:
-            return "HIGH"
-        if score >= 3:
-            return "MEDIUM"
-        return "LOW"
-
-    @staticmethod
-    def _explanation(
-        horizon_label: str,
-        predicted_return: float,
-        signal: str,
-        confidence: str,
-        metrics: dict[str, Any],
-        components: dict[str, float] | None = None,
-        training_mode: str = "ols",
-    ) -> str:
-        direction_text = (
-            "상승"
-            if predicted_return > 0
-            else "하락"
-            if predicted_return < 0
-            else "보합"
-        )
-
-        return_percent = predicted_return * 100
-        direction_accuracy = metrics.get("direction_accuracy")
-        r2 = metrics.get("r2")
-        samples = metrics.get("sample_count", 0)
-
-        if training_mode == "ols":
-            model_text = (
-                f"과거 {samples}개 구간을 학습한 모델에서 "
-                f"방향 예측률 {direction_accuracy:.1f}%"
-                if direction_accuracy is not None
-                else "과거 시장 데이터를 학습한 모델"
-            )
-            if r2 is not None:
-                model_text += f", 설명력 R² {r2:.2f}"
-        else:
-            model_text = (
-                "장기 학습에 필요한 동일 horizon 데이터가 아직 충분하지 않아 "
-                "최근 추세를 보수적으로 외삽"
-            )
-
-        signal_text = {
-            "BUY": "매수 우위",
-            "SELL": "매도 우위",
-            "HOLD": "관망",
-        }.get(signal, "관망")
-
-        component_text = ""
-        if components:
-            positive = [
-                name
-                for name, value in components.items()
-                if value > 0.001
-            ]
-            negative = [
-                name
-                for name, value in components.items()
-                if value < -0.001
-            ]
-
-            if positive:
-                component_text += f" 상승 신호: {', '.join(positive)}."
-            if negative:
-                component_text += f" 하락 신호: {', '.join(negative)}."
-
-        return (
-            f"{horizon_label} 기준 예상 수익률은 {return_percent:+.2f}%로 "
-            f"{direction_text} 방향입니다. {model_text}. "
-            f"현재 판단은 {signal_text}이며 신뢰도는 {confidence}입니다."
-            f"{component_text}"
+        return intercept + sum(
+            weight * feature
+            for weight, feature in zip(weights, features)
         )
 
     @staticmethod
-    def predict_horizon(
-        gdxu_history: deque[QuoteRead],
-        futures_history: deque[QuoteRead],
-        miners_history: deque[QuoteRead],
-        spot_history: deque[QuoteRead],
-        horizon_key: str,
-    ) -> dict[str, Any]:
-        horizon = PricePredictor.HORIZONS[horizon_key]
-        horizon_steps = PricePredictor._horizon_steps(
-            spot_history,
-            horizon["hours"],
-        )
+    def _calculate_metrics(
+        x_values: list[list[float]],
+        y_values: list[float],
+        weights: list[float],
+        intercept: float,
+    ) -> dict[str, float | int | None]:
 
-        sample_count = min(
-            len(gdxu_history),
-            len(futures_history),
-            len(miners_history),
-            len(spot_history),
-        )
-
-        current_price = (
-            spot_history[-1].price
-            if spot_history
-            else None
-        )
-
-        if current_price is None or sample_count < 12:
-            metrics = {
+        if not y_values:
+            return {
                 "mae_percent": None,
                 "rmse_percent": None,
                 "direction_accuracy": None,
@@ -1052,270 +842,93 @@ class PricePredictor:
                 "model_beta": None,
             }
 
-            return {
-                "key": horizon_key,
-                "label": horizon["label"],
-                "horizon": horizon["description"],
-                "hours": horizon["hours"],
-                "steps": horizon_steps,
-                "predicted_price": None,
-                "predicted_return_percent": None,
-                "recommendation": "HOLD",
-                "confidence": "LOW",
-                "training_mode": "insufficient",
-                "reason": (
-                    f"{horizon['label']} 예측에 필요한 시장 데이터가 "
-                    f"부족합니다. 현재 공통 데이터는 {sample_count}개입니다."
-                ),
-                "metrics": metrics,
-            }
+        predictions = [
+            PricePredictor._predict_with_model(
+                weights,
+                intercept,
+                x,
+            )
+            for x in x_values
+        ]
 
-        x_values, y_values = PricePredictor._build_training_data(
-            gdxu_history,
-            futures_history,
-            miners_history,
-            spot_history,
-            horizon_steps,
+        errors = [
+            predicted - actual
+            for predicted, actual
+            in zip(predictions, y_values)
+        ]
+
+        mae = PricePredictor._mean(
+            [abs(error) for error in errors]
         )
 
-        training_mode = "ols"
-        components = None
-
-        if len(x_values) >= PricePredictor.MIN_SAMPLES:
-            x_values = x_values[-PricePredictor.WINDOW:]
-            y_values = y_values[-PricePredictor.WINDOW:]
-
-            weights, intercept = PricePredictor._ols_fit(
-                x_values,
-                y_values,
+        rmse = (
+            PricePredictor._mean(
+                [error * error for error in errors]
             )
+            ** 0.5
+        )
 
-            if weights:
-                latest_index = sample_count - 1
-                latest_features = PricePredictor._multi_features(
-                    gdxu_history,
-                    futures_history,
-                    miners_history,
-                    spot_history,
-                    latest_index,
-                )
+        actual_mean = PricePredictor._mean(y_values)
 
-                if latest_features is not None:
-                    predicted_return = PricePredictor._predict_with_model(
-                        weights,
-                        intercept,
-                        latest_features,
-                    )
-                    metrics = PricePredictor._calculate_metrics(
-                        x_values,
-                        y_values,
-                        weights,
-                        intercept,
-                    )
-                else:
-                    predicted_return = 0.0
-                    metrics = {
-                        "mae_percent": None,
-                        "rmse_percent": None,
-                        "direction_accuracy": None,
-                        "r2": None,
-                        "sample_count": len(y_values),
-                        "model_beta": None,
-                    }
-            else:
-                predicted_return, components = PricePredictor._trend_fallback(
-                    gdxu_history,
-                    futures_history,
-                    miners_history,
-                    spot_history,
-                    horizon_steps,
-                )
-                training_mode = "trend_fallback"
-                metrics = {
-                    "mae_percent": None,
-                    "rmse_percent": None,
-                    "direction_accuracy": None,
-                    "r2": None,
-                    "sample_count": 0,
-                    "model_beta": round(predicted_return * 100, 4),
-                }
+        ss_total = sum(
+            (actual - actual_mean) ** 2
+            for actual in y_values
+        )
+
+        ss_residual = sum(
+            error * error
+            for error in errors
+        )
+
+        if ss_total > 0:
+            r2 = 1.0 - (ss_residual / ss_total)
         else:
-            predicted_return, components = PricePredictor._trend_fallback(
-                gdxu_history,
-                futures_history,
-                miners_history,
-                spot_history,
-                horizon_steps,
-            )
-            training_mode = "trend_fallback"
-            metrics = {
-                "mae_percent": None,
-                "rmse_percent": None,
-                "direction_accuracy": None,
-                "r2": None,
-                "sample_count": len(y_values),
-                "model_beta": round(predicted_return * 100, 4),
-            }
+            r2 = None
 
-        # 예측값이 비정상적으로 튀는 것을 방지
-        predicted_return = max(-0.15, min(0.15, predicted_return))
+        correct = 0
 
-        predicted_price = (
-            current_price
-            * Decimal(str(1.0 + predicted_return))
-        ).quantize(Decimal("0.01"))
+        for predicted, actual in zip(
+            predictions,
+            y_values,
+        ):
+            if (
+                predicted > 0
+                and actual > 0
+            ) or (
+                predicted < 0
+                and actual < 0
+            ) or (
+                abs(predicted) < 1e-12
+                and abs(actual) < 1e-12
+            ):
+                correct += 1
 
-        signal = PricePredictor._signal_from_return(predicted_return)
-        confidence = PricePredictor._confidence(
-            metrics,
-            predicted_return,
-            training_mode,
-        )
-
-        reason = PricePredictor._explanation(
-            horizon["label"],
-            predicted_return,
-            signal,
-            confidence,
-            metrics,
-            components,
-            training_mode,
+        direction_accuracy = (
+            correct / len(y_values)
+            if y_values
+            else None
         )
 
         return {
-            "key": horizon_key,
-            "label": horizon["label"],
-            "horizon": horizon["description"],
-            "hours": horizon["hours"],
-            "steps": horizon_steps,
-            "predicted_price": float(predicted_price),
-            "predicted_return_percent": round(
-                predicted_return * 100,
-                3,
-            ),
-            "recommendation": signal,
-            "confidence": confidence,
-            "training_mode": training_mode,
-            "reason": reason,
-            "metrics": metrics,
-            "components": components,
+            "mae_percent": round(mae * 100, 4),
+            "rmse_percent": round(rmse * 100, 4),
+            "direction_accuracy": round(
+                direction_accuracy * 100,
+                2,
+            ) if direction_accuracy is not None else None,
+            "r2": round(r2, 4) if r2 is not None else None,
+            "sample_count": len(y_values),
+            "model_beta": round(
+                weights[0],
+                6,
+            ) if weights else None,
         }
-
-    @staticmethod
-    def predict_multi_horizon(
-        gdxu_history: deque[QuoteRead],
-        futures_history: deque[QuoteRead],
-        miners_history: deque[QuoteRead],
-        spot_history: deque[QuoteRead],
-    ) -> dict[str, Any]:
-        results: dict[str, Any] = {}
-
-        for horizon_key in PricePredictor.HORIZONS:
-            results[horizon_key] = PricePredictor.predict_horizon(
-                gdxu_history,
-                futures_history,
-                miners_history,
-                spot_history,
-                horizon_key,
-            )
-
-        short_result = results["short"]
-
-        PricePredictor.last_metrics = short_result["metrics"]
-
-        # 전체 방향: 단기 50%, 중기 30%, 장기 20%
-        direction_weights = {
-            "short": 0.50,
-            "medium": 0.30,
-            "long": 0.20,
-        }
-
-        weighted_return = 0.0
-        total_weight = 0.0
-
-        for key, weight in direction_weights.items():
-            value = results[key].get("predicted_return_percent")
-            if value is None:
-                continue
-            weighted_return += float(value) * weight
-            total_weight += weight
-
-        if total_weight > 0:
-            weighted_return /= total_weight
-
-        overall_signal = PricePredictor._signal_from_return(
-            weighted_return / 100.0,
-        )
-
-        if overall_signal == "BUY":
-            overall_summary = (
-                f"단·중·장기 예측을 종합하면 상승 우위입니다. "
-                f"가중 예상 수익률은 {weighted_return:+.2f}%입니다."
-            )
-        elif overall_signal == "SELL":
-            overall_summary = (
-                f"단·중·장기 예측을 종합하면 하락 우위입니다. "
-                f"가중 예상 수익률은 {weighted_return:+.2f}%입니다."
-            )
-        else:
-            overall_summary = (
-                f"단·중·장기 방향이 엇갈리거나 변동폭이 작습니다. "
-                f"가중 예상 수익률은 {weighted_return:+.2f}%로 관망 구간입니다."
-            )
-
-        return {
-            "short": results["short"],
-            "medium": results["medium"],
-            "long": results["long"],
-            "overall": {
-                "recommendation": overall_signal,
-                "weighted_expected_return_percent": round(
-                    weighted_return,
-                    3,
-                ),
-                "summary": overall_summary,
-            },
-        }
-
-    @staticmethod
-    def predict_spot_from_market_signals(
-        gdxu_history: deque[QuoteRead],
-        futures_history: deque[QuoteRead],
-        miners_history: deque[QuoteRead],
-        spot_history: deque[QuoteRead],
-    ) -> tuple[Decimal | None, str, str]:
-        """
-        기존 API 호환용.
-        단기(3시간) 예측을 기존 predicted_price/recommendation/reason 형태로 반환한다.
-        """
-        result = PricePredictor.predict_multi_horizon(
-            gdxu_history,
-            futures_history,
-            miners_history,
-            spot_history,
-        )
-
-        short = result["short"]
-
-        predicted_price = short.get("predicted_price")
-        if predicted_price is not None:
-            predicted_price_decimal = Decimal(str(predicted_price))
-        else:
-            predicted_price_decimal = None
-
-        return (
-            predicted_price_decimal,
-            short.get("recommendation", "HOLD"),
-            short.get("reason", "예측 데이터가 부족합니다."),
-        )
 
     @staticmethod
     def predict_price(
         history: deque[QuoteRead],
     ) -> tuple[Decimal | None, str, str]:
-        """
-        기존 이메일 리포트 호환용 단순 예측.
-        """
+
         if len(history) < 2:
             return None, "HOLD", "가격 히스토리가 부족해 예측이 불가합니다."
 
@@ -1325,7 +938,10 @@ class PricePredictor:
         if previous_price == 0:
             return None, "HOLD", "이전 가격 데이터가 유효하지 않습니다."
 
-        change = (last_price - previous_price) / previous_price
+        change = (
+            last_price - previous_price
+        ) / previous_price
+
         predicted_price = (
             last_price * (Decimal("1.0") + change)
         )
@@ -1346,6 +962,246 @@ class PricePredictor:
             reason,
         )
 
+    @staticmethod
+    def predict_spot_from_market_signals(
+        gdxu_history: deque[QuoteRead],
+        futures_history: deque[QuoteRead],
+        miners_history: deque[QuoteRead],
+        spot_history: deque[QuoteRead],
+    ) -> tuple[Decimal | None, str, str]:
+
+        sample_count = min(
+            len(gdxu_history),
+            len(futures_history),
+            len(miners_history),
+            len(spot_history),
+        )
+
+# _multi_features()에서 10-period 수익률을 사용하므로
+# 최소 11개 데이터가 필요하다.
+        MIN_HISTORY_LENGTH = 11
+
+        if sample_count < MIN_HISTORY_LENGTH:
+            PricePredictor.last_metrics = {
+                "mae_percent": None,
+                "rmse_percent": None,
+                "direction_accuracy": None,
+                "r2": None,
+                "sample_count": 0,
+                "model_beta": None,
+            }
+
+            return (
+                None,
+                "HOLD",
+                f"GDXU, 금선물, 금광, 금현물 데이터가 부족합니다. "
+                f"(현재 {sample_count}개 / 최소 {MIN_HISTORY_LENGTH}개)",
+            )
+
+        x_values: list[list[float]] = []
+        y_values: list[float] = []
+
+        # 과거 → 다음 시점 GOLD 수익률 학습
+        for index in range(10, sample_count - 1):
+
+            features = PricePredictor._multi_features(
+                gdxu_history,
+                futures_history,
+                miners_history,
+                spot_history,
+                index,
+            )
+
+            if features is None:
+                continue
+
+            current_price = spot_history[index].price
+            next_price = spot_history[index + 1].price
+
+            target = PricePredictor._return(
+                next_price,
+                current_price,
+            )
+
+            if target is None:
+                continue
+
+            x_values.append(features)
+            y_values.append(target)
+
+        if len(x_values) < PricePredictor.MIN_SAMPLES:
+            return (
+                None,
+                "HOLD",
+                "GOLD 예측 학습 데이터가 부족합니다.",
+            )
+
+        # 최근 WINDOW개만 사용
+        x_values = x_values[-PricePredictor.WINDOW:]
+        y_values = y_values[-PricePredictor.WINDOW:]
+
+        weights, intercept = PricePredictor._ols_fit(
+            x_values,
+            y_values,
+        )
+
+        if not weights:
+            return (
+                None,
+                "HOLD",
+                "예측 모델 계산에 실패했습니다.",
+            )
+
+        # 최신 feature
+        latest_index = sample_count - 1
+
+        latest_features = PricePredictor._multi_features(
+            gdxu_history,
+            futures_history,
+            miners_history,
+            spot_history,
+            latest_index,
+        )
+
+        if latest_features is None:
+            return (
+                None,
+                "HOLD",
+                "최신 시장 데이터가 부족합니다.",
+            )
+
+        predicted_return = intercept
+
+        for weight, feature in zip(
+            weights,
+            latest_features,
+        ):
+            predicted_return += weight * feature
+
+        spot_last = spot_history[-1].price
+
+        predicted_price = (
+            spot_last
+            * Decimal(str(1.0 + predicted_return))
+        ).quantize(Decimal("0.01"))
+
+        # --------------------------------------------------
+        # 모델 성능 계산
+        # --------------------------------------------------
+        predictions: list[float] = []
+
+        for features in x_values:
+            prediction = intercept
+
+            for weight, feature in zip(
+                weights,
+                features,
+            ):
+                prediction += weight * feature
+
+            predictions.append(prediction)
+
+        errors = [
+            prediction - actual
+            for prediction, actual in zip(
+                predictions,
+                y_values,
+            )
+        ]
+
+        mae = (
+            sum(abs(error) for error in errors)
+            / len(errors)
+        )
+
+        rmse = (
+            sum(error * error for error in errors)
+            / len(errors)
+        ) ** 0.5
+
+        actual_mean = (
+            sum(y_values) / len(y_values)
+        )
+
+        ss_total = sum(
+            (actual - actual_mean) ** 2
+            for actual in y_values
+        )
+
+        ss_residual = sum(
+            error * error
+            for error in errors
+        )
+
+        r2 = (
+            1.0 - ss_residual / ss_total
+            if ss_total > 0
+            else 0.0
+        )
+
+        direction_correct = sum(
+            1
+            for prediction, actual in zip(
+                predictions,
+                y_values,
+            )
+            if (
+                prediction >= 0
+                and actual >= 0
+            )
+            or (
+                prediction < 0
+                and actual < 0
+            )
+        )
+
+        direction_accuracy = (
+            direction_correct
+            / len(y_values)
+            * 100
+        )
+
+        PricePredictor.last_metrics = {
+            "mae_percent": round(mae * 100, 4),
+            "rmse_percent": round(rmse * 100, 4),
+            "direction_accuracy": round(
+                direction_accuracy,
+                2,
+            ),
+            "r2": round(r2, 4),
+            "sample_count": len(y_values),
+            "model_beta": round(
+                predicted_return * 100,
+                4,
+            ),
+        }
+
+        # --------------------------------------------------
+        # 추천
+        # --------------------------------------------------
+        if predicted_return > 0.001:
+            signal = "BUY"
+            reason = (
+                "금선물·금광·GDXU의 상승 신호를 종합하면 "
+                "ACE KRX금현물의 추가 상승 가능성이 있습니다."
+            )
+
+        elif predicted_return < -0.001:
+            signal = "SELL"
+            reason = (
+                "금선물·금광·GDXU의 하락 신호를 종합하면 "
+                "ACE KRX금현물의 조정 가능성이 있습니다."
+            )
+
+        else:
+            signal = "HOLD"
+            reason = (
+                "금선물·금광·GDXU의 방향성이 뚜렷하지 않아 "
+                "금현물은 관망하는 것이 적절합니다."
+            )
+
+        return predicted_price, signal, reason
+
 class MarketScheduler:
     DEFAULT_SYMBOLS = [
         "마이크로섹터 금광3배 ETN",
@@ -1362,7 +1218,7 @@ class MarketScheduler:
         self.gap_calc_interval_seconds = int(os.getenv("GAP_CALC_INTERVAL_SECONDS", "60"))
         self.email_interval_seconds = int(os.getenv("EMAIL_REPORT_INTERVAL_SECONDS", "3600"))
         self.initial_history_days = int(os.getenv("MARKET_HISTORY_DAYS", "30"))
-        self.history_maxlen = int(os.getenv("MARKET_HISTORY_MAXLEN", "50000"))
+        self.history_maxlen = int(os.getenv("MARKET_HISTORY_MAXLEN", "1440"))
         self.recipient = os.getenv("EMAIL_RECIPIENT", "bonapart97@gmail.com")
         self.sender = os.getenv("EMAIL_SENDER")
         self.smtp_server = os.getenv("EMAIL_SMTP_SERVER")
@@ -1657,57 +1513,26 @@ class MarketScheduler:
             "ACE=", len(history),
         )
 
-        multi_prediction = PricePredictor.predict_multi_horizon(
-            gold_history,
-            futures_history,
-            miners_history,
-            history,
+        predicted_price, signal, reason = (
+            PricePredictor.predict_spot_from_market_signals(
+                gold_history,
+                futures_history,
+                miners_history,
+                history,
+            )
         )
 
-        short_prediction = multi_prediction.get("short", {})
-        predicted_price = (
-            Decimal(str(short_prediction["predicted_price"]))
-            if short_prediction.get("predicted_price") is not None
-            else None
-        )
-        signal = short_prediction.get("recommendation", "HOLD")
-        reason = short_prediction.get(
-            "reason",
-            "예측 데이터가 부족합니다.",
-        )
+        # 예측값을 차트에 표시하기 위한 미래 시점 데이터
+        future_point = None
 
-        # 단기/중기/장기 예측을 차트에 표시하기 위한 미래 시점 데이터
-        future_points: dict[str, dict[str, object]] = {}
-        if history:
-            last_timestamp = history[-1].timestamp
-
-            for horizon_key, horizon_data in multi_prediction.items():
-                if horizon_key == "overall" or not isinstance(horizon_data, dict):
-                    continue
-
-                forecast_price = horizon_data.get("predicted_price")
-                if forecast_price is None:
-                    continue
-
-                hours = float(horizon_data.get("hours", 0))
-                future_points[horizon_key] = {
-                    "symbol": prediction_symbol,
-                    "price": float(forecast_price),
-                    "timestamp": (
-                        last_timestamp + timedelta(hours=hours)
-                    ).isoformat(),
-                    "recommendation": horizon_data.get(
-                        "recommendation",
-                        "HOLD",
-                    ),
-                    "confidence": horizon_data.get(
-                        "confidence",
-                        "LOW",
-                    ),
-                }
-
-        # 기존 프론트엔드 호환용: future_point는 단기(3시간) 예측
-        future_point = future_points.get("short")
+        if predicted_price is not None and history:
+            future_point = {
+                "symbol": prediction_symbol,
+                "price": float(predicted_price),
+                "timestamp": (
+                    history[-1].timestamp + timedelta(days=1)
+                ).isoformat(),
+            }
 
         latest_quotes = {}
         ace_latest_price = None
@@ -1784,13 +1609,6 @@ class MarketScheduler:
                 "recommendation": signal,
                 "reason": reason,
                 "future_point": future_point,
-                "future_points": future_points,
-                "horizons": {
-                    "short": multi_prediction.get("short"),
-                    "medium": multi_prediction.get("medium"),
-                    "long": multi_prediction.get("long"),
-                },
-                "overall": multi_prediction.get("overall"),
                 "gap_percent": gap_percent,
                 "gap_description": gap_description,
                 "gap_thresholds": {"positive": float(pos_thresh), "negative_abs": float(neg_thresh_abs)},
@@ -2051,62 +1869,16 @@ class MarketScheduler:
         prediction_symbol = "ACE KRX금현물"
         normalized = self.normalize_symbol(prediction_symbol)
         history = self.history.get(normalized, deque())
+        predicted_price, signal, reason = PricePredictor.predict_price(history)
 
-        gold_history = self.history.get(
-            self.normalize_symbol(self.DEFAULT_SYMBOLS[0]),
-            deque(),
-        )
-        futures_history = self.history.get(
-            self.normalize_symbol("ACE 골드선물 레버리지"),
-            deque(),
-        )
-        miners_history = self.history.get(
-            self.normalize_symbol("HANARO 글로벌금채굴기업"),
-            deque(),
-        )
+        lines.append("[ACE KRX금현물 가격 예측]")
+        if predicted_price is not None:
+            lines.append(f"예측 가격: {predicted_price}")
+            lines.append(f"추천: {signal}")
+            lines.append(f"사유: {reason}")
+        else:
+            lines.append(reason)
 
-        multi_prediction = PricePredictor.predict_multi_horizon(
-            gold_history,
-            futures_history,
-            miners_history,
-            history,
-        )
-
-        lines.append("[ACE KRX금현물 다중 시간축 예측]")
-
-        for key, title in (
-            ("short", "단기 3시간"),
-            ("medium", "중기 3일"),
-            ("long", "장기 30일"),
-        ):
-            item = multi_prediction.get(key, {})
-            price = item.get("predicted_price")
-            expected = item.get("predicted_return_percent")
-            recommendation = item.get("recommendation", "HOLD")
-            confidence = item.get("confidence", "LOW")
-
-            lines.append(f"[{title}]")
-            if price is None:
-                lines.append(item.get("reason", "예측 데이터가 부족합니다."))
-            else:
-                lines.append(f"예측 가격: {price:,.2f}원")
-                lines.append(f"예상 수익률: {expected:+.2f}%")
-                lines.append(f"추천: {recommendation}")
-                lines.append(f"신뢰도: {confidence}")
-                lines.append(f"설명: {item.get('reason', '')}")
-            lines.append("")
-
-        overall = multi_prediction.get("overall", {})
-        lines.append("[종합 판단]")
-        lines.append(
-            f"추천: {overall.get('recommendation', 'HOLD')}"
-        )
-        lines.append(
-            overall.get(
-                "summary",
-                "단·중·장기 예측을 종합할 수 없습니다.",
-            )
-        )
         lines.append("")
         lines.append("[매수/매도 시점 알림]")
         previous_price = history[-2].price if len(history) >= 2 else None

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>GOLD AI Market Dashboard</title>
+<style>
+*{box-sizing:border-box}
+:root{--bg:#0b1220;--panel:#111b2e;--line:#24324a;--text:#e8eef8;--muted:#8fa0b8;--green:#43d17a;--red:#ff6b7a;--blue:#64a9ff;--yellow:#e7c76b}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.container{max-width:1500px;margin:auto;padding:18px}
+header{display:flex;justify-content:space-between;align-items:end;gap:16px;margin-bottom:14px}
+h1{font-size:24px;margin:0 0 4px}.subtitle{color:var(--muted);font-size:13px}.status{color:var(--muted);font-size:12px;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.card,.prediction-card,.metric,.chart-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px}
+.label{color:var(--muted);font-size:12px}.value{font-size:22px;font-weight:800;margin-top:5px}.small{color:var(--muted);font-size:11px;margin-top:4px}
+.section-title{font-size:15px;font-weight:800;margin:15px 0 8px}.prediction-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.prediction-card{min-height:180px}
+.horizon{font-size:11px;color:var(--blue);font-weight:800}.horizon-title{font-size:17px;font-weight:800;margin-top:2px}.prediction-price{font-size:25px;font-weight:900;margin:12px 0 5px}
+.expected{font-size:12px;color:var(--muted)}.signal{display:inline-block;border-radius:999px;padding:4px 10px;margin-top:7px;font-size:11px;font-weight:900;background:#273349}.signal.BUY{background:rgba(67,209,122,.15);color:var(--green)}.signal.SELL{background:rgba(255,107,122,.15);color:var(--red)}.signal.HOLD{color:var(--yellow)}
+.reason{margin-top:9px;color:#c8d3e3;font-size:12px;line-height:1.45}.confidence{margin-top:7px;color:var(--muted);font-size:11px}
+.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{padding:11px}.metric .value{font-size:19px}.metric small{display:block;color:var(--muted);margin-top:3px;font-size:10px}
+.chart-card{margin-top:10px;height:310px}.chart-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}.chart-head h2{font-size:14px;margin:0}.legend{font-size:10px;color:var(--muted)}canvas{width:100%;height:260px}
+.table-wrap{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:auto;margin-top:10px}table{width:100%;border-collapse:collapse}th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{color:var(--muted);font-size:10px}td{font-size:12px}
+@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.prediction-grid{grid-template-columns:1fr}}
+@media(max-width:600px){.container{padding:10px}.grid,.metrics{grid-template-columns:1fr}.chart-card{height:270px}canvas{height:220px}}
+
+/* ===== Compact dashboard mode ===== */
+html, body {
+  font-size: 12px;
+}
+body {
+  line-height: 1.3;
+}
+.container, .dashboard, main {
+  max-width: 1500px;
+}
+header {
+  margin-bottom: 8px !important;
+}
+section, .card, .panel, .metric-card, .prediction-card {
+  margin-bottom: 8px !important;
+}
+.card, .panel, .metric-card, .prediction-card {
+  padding: 9px !important;
+}
+.grid, .cards, .metrics, .prediction-grid {
+  gap: 7px !important;
+}
+h1 { font-size: 21px !important; margin: 0 0 4px !important; }
+h2 { font-size: 15px !important; margin: 0 0 5px !important; }
+h3 { font-size: 13px !important; margin: 0 0 4px !important; }
+.small, small, .muted, .description, .timestamp {
+  font-size: 10px !important;
+}
+.metric-value, .price, .prediction-price {
+  font-size: 18px !important;
+}
+canvas {
+  max-height: 230px !important;
+}
+@media (min-width: 1100px) {
+  .prediction-grid {
+    grid-template-columns: repeat(3, 1fr) !important;
+  }
+  .metrics, .cards {
+    grid-template-columns: repeat(4, 1fr) !important;
+  }
+}
+@media (max-height: 850px) and (min-width: 900px) {
+  header { padding: 8px 0 !important; }
+  .card, .panel, .metric-card, .prediction-card { padding: 7px !important; }
+  canvas { max-height: 190px !important; }
+}
+
+</style>
+</head>
+<body>
+<div class="container">
+<header><div><h1>GOLD AI Market Dashboard</h1><div class="subtitle">GDXU · 금선물 · 금광 · ACE KRX금현물 기반 3시간 / 3일 / 30일 예측</div></div><div id="status" class="status">데이터 로딩 중...</div></header>
+<div class="grid">
+<div class="card"><div class="label">GDXU</div><div id="gdxu" class="value">-</div><div id="gdxuTime" class="small">-</div></div>
+<div class="card"><div class="label">금선물</div><div id="futures" class="value">-</div><div id="futuresTime" class="small">-</div></div>
+<div class="card"><div class="label">금광</div><div id="miners" class="value">-</div><div id="minersTime" class="small">-</div></div>
+<div class="card"><div class="label">ACE KRX금현물</div><div id="spot" class="value">-</div><div id="spotTime" class="small">-</div></div>
+</div>
+<div class="section-title">금 가격 예측 <span style="font-size:10px;color:#8fa0b8;font-weight:400;">(API가 3개 기간을 제공하면 각 기간별 표시)</span></div>
+<div class="prediction-grid">
+<div class="prediction-card"><div class="horizon">단기 · 약 3시간</div><div class="horizon-title">단타 추세</div><div id="shortPrice" class="prediction-price">-</div><div id="shortExpected" class="expected"></div><span id="shortSignal" class="signal">-</span><div id="shortReason" class="reason">-</div><div id="shortConfidence" class="confidence">신뢰도: -</div></div>
+<div class="prediction-card"><div class="horizon">중기 · 약 3일</div><div class="horizon-title">스윙 추세</div><div id="mediumPrice" class="prediction-price">-</div><div id="mediumExpected" class="expected"></div><span id="mediumSignal" class="signal">-</span><div id="mediumReason" class="reason">-</div><div id="mediumConfidence" class="confidence">신뢰도: -</div></div>
+<div class="prediction-card"><div class="horizon">장기 · 약 30일</div><div class="horizon-title">중장기 추세</div><div id="longPrice" class="prediction-price">-</div><div id="longExpected" class="expected"></div><span id="longSignal" class="signal">-</span><div id="longReason" class="reason">-</div><div id="longConfidence" class="confidence">신뢰도: -</div></div>
+</div>
+<div class="section-title">예측 모델 지표</div>
+<div class="metrics">
+<div class="metric"><div class="label">방향 예측률</div><div id="directionAccuracy" class="value">-</div><small>상승·하락 방향을 맞힌 비율</small></div>
+<div class="metric"><div class="label">평균 오차 (MAE)</div><div id="mae" class="value">-</div><small>예측값과 실제값의 평균 오차</small></div>
+<div class="metric"><div class="label">예측 설명력 (R²)</div><div id="r2" class="value">-</div><small>가격 움직임을 설명하는 정도</small></div>
+</div>
+<div id="modelExtra" class="small" style="text-align:right;margin-top:5px;">학습 샘플 -개 · 모델 변동계수 -</div>
+<div class="section-title">금 가격 추세</div>
+<div class="chart-card"><div class="chart-head"><h2>최근 ACE KRX금현물 추세</h2><div id="chartLegend" class="legend">-</div></div><canvas id="trendChart"></canvas></div>
+<div class="section-title">시장 데이터</div>
+<div class="table-wrap"><table><thead><tr><th>종목</th><th>현재가</th><th>업데이트</th></tr></thead><tbody id="quotesBody"></tbody></table></div>
+</div>
+<script>
+const API_URL="/api/dashboard-data";const $=id=>document.getElementById(id);
+function fmt(v,d=2){if(v==null||Number.isNaN(Number(v)))return"-";return Number(v).toLocaleString("ko-KR",{minimumFractionDigits:d,maximumFractionDigits:d})}
+function fmtTime(v){if(!v)return"-";const d=new Date(v);return Number.isNaN(d.getTime())?v:d.toLocaleTimeString("ko-KR",{hour12:false})}
+function setText(id,v){if($(id))$(id).textContent=v}
+function findQuote(q,names){const keys=Object.keys(q||{});const k=keys.find(x=>names.some(y=>x.includes(y)));return k?q[k]:null}
+function getPrediction(d, horizon){
+  const root=d.predictions||{};
+  if(root && root[horizon]) return root[horizon];
+  const p=d.prediction;
+  if(p && typeof p==="object") return p;
+  return null;
+}
+function renderPrediction(prefix,v){
+  if(!v){
+    setText(prefix+"Price","-");
+    setText(prefix+"Expected","예측 데이터 없음");
+    const e=$(prefix+"Signal"); if(e){e.textContent="N/A";e.className="signal";}
+    setText(prefix+"Reason","해당 기간의 예측 데이터가 API에서 제공되지 않습니다.");
+    setText(prefix+"Confidence","신뢰도: -");
+    return;
+  }
+  const price=v.predicted_price;
+  const ret=v.predicted_return_percent ?? v.predicted_return;
+  setText(prefix+"Price",price==null?"-":fmt(price)+" 원");
+  setText(prefix+"Expected",ret==null?"":"예상 변화: "+(Number(ret)>=0?"+":"")+fmt(ret)+"%");
+  const signal=v.recommendation||"HOLD";
+  const e=$(prefix+"Signal");
+  if(e){e.textContent=signal;e.className="signal "+signal;}
+  setText(prefix+"Reason",v.explanation||v.reason||"예측 설명이 없습니다.");
+  const c=v.confidence ?? v.model_metrics?.direction_accuracy ?? v.metrics?.direction_accuracy;
+  setText(prefix+"Confidence",c==null?"신뢰도: -":"신뢰도: "+fmt(c)+"%");
+}
+function drawTrend(history){const canvas=$("trendChart"),ctx=canvas.getContext("2d"),rect=canvas.getBoundingClientRect(),dpr=devicePixelRatio||1;canvas.width=rect.width*dpr;canvas.height=260*dpr;ctx.scale(dpr,dpr);const w=rect.width,h=260,pad={l:52,r:15,t:15,b:28};ctx.clearRect(0,0,w,h);if(!history||history.length<2){ctx.fillStyle="#8fa0b8";ctx.fillText("추세 데이터가 부족합니다.",pad.l,60);return}const data=history.slice(-120).map(x=>({v:Number(x.price),t:x.timestamp})).filter(x=>Number.isFinite(x.v));if(data.length<2)return;const min=Math.min(...data.map(x=>x.v)),max=Math.max(...data.map(x=>x.v)),range=max-min||1,x=i=>pad.l+i*(w-pad.l-pad.r)/(data.length-1),y=v=>pad.t+(max-v)*(h-pad.t-pad.b)/range;ctx.strokeStyle="#24324a";ctx.lineWidth=1;for(let i=0;i<4;i++){const yy=pad.t+i*(h-pad.t-pad.b)/3;ctx.beginPath();ctx.moveTo(pad.l,yy);ctx.lineTo(w-pad.r,yy);ctx.stroke()}ctx.strokeStyle="#64a9ff";ctx.lineWidth=2;ctx.beginPath();data.forEach((p,i)=>i?ctx.lineTo(x(i),y(p.v)):ctx.moveTo(x(i),y(p.v)));ctx.stroke();ctx.fillStyle="#8fa0b8";ctx.font="10px sans-serif";for(let i=0;i<4;i++){const val=max-i*range/3;ctx.fillText(fmt(val,0),5,pad.t+i*(h-pad.t-pad.b)/3+4)}ctx.fillText(fmt(data[data.length-1].v)+" 원",w-105,pad.t+12);setText("chartLegend","최근 "+data.length+"개 관측값 · 최신 "+fmtTime(data[data.length-1].t))}
+function render(d){const q=d.latest_quotes||{},a=findQuote(q,["금광3배","MICROSECTOR","GDXU"]),b=findQuote(q,["골드선물","GOLD_FUTURES"]),c=findQuote(q,["글로벌금채굴","GOLD_MINERS"]),s=findQuote(q,["KRX금현물","ACE_KRX_GOLD"]);if(a){setText("gdxu",fmt(a.krw_price_div10??a.price_usd));setText("gdxuTime",fmtTime(a.timestamp))}if(b){setText("futures",fmt(b.price));setText("futuresTime",fmtTime(b.timestamp))}if(c){setText("miners",fmt(c.price));setText("minersTime",fmtTime(c.timestamp))}if(s){setText("spot",fmt(s.price));setText("spotTime",fmtTime(s.timestamp))}const shortPred=getPrediction(d,"short_term")||getPrediction(d,"short")||getPrediction(d,"intraday")||getPrediction(d,"3h");
+const mediumPred=getPrediction(d,"medium_term")||getPrediction(d,"medium")||getPrediction(d,"3d");
+const longPred=getPrediction(d,"long_term")||getPrediction(d,"long")||getPrediction(d,"30d");
+renderPrediction("short",shortPred);
+renderPrediction("medium",mediumPred);
+renderPrediction("long",longPred);
+const m=d.model_metrics||d.prediction?.model_metrics||d.predictions?.model_metrics||{};
+setText("directionAccuracy",m.direction_accuracy==null?"-":fmt(m.direction_accuracy)+"%");
+setText("mae",m.mae_percent==null?"-":fmt(m.mae_percent,3)+"%");
+setText("r2",m.r2==null?"-":fmt(m.r2,3));
+if($("modelExtra")){
+  const sample=m.sample_count==null?"-":m.sample_count;
+  const beta=m.model_beta==null?"-":fmt(m.model_beta,4);
+  $("modelExtra").textContent="학습 샘플 "+sample+"개 · 모델 변동계수 "+beta;
+}const body=$("quotesBody");body.innerHTML="";for(const [name,x] of Object.entries(q)){const tr=document.createElement("tr");tr.innerHTML="<td>"+name+"</td><td>"+fmt(x.krw_price_div10??x.price??x.price_usd)+"</td><td>"+fmtTime(x.timestamp)+"</td>";body.appendChild(tr)}const normalized=d.series||{},spotKey=Object.keys(normalized).find(k=>k.includes("ACE_KRX_GOLD"));drawTrend(spotKey?normalized[spotKey]:[]);setText("status","마지막 갱신: "+new Date().toLocaleString("ko-KR",{hour12:false}))}
+async function load(){try{const r=await fetch(API_URL,{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status);render(await r.json())}catch(e){setText("status","대시보드 데이터를 불러오지 못했습니다: "+e.message)}}load();setInterval(load,60000);
+</script>
+</body></html>
