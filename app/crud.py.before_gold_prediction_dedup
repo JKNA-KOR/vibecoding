@@ -232,26 +232,6 @@ def create_gold_prediction(
     return prediction
 
 
-
-def find_gold_prediction(
-    db: Session,
-    symbol: str,
-    horizon: str,
-    predicted_at: datetime,
-    target_timestamp: datetime,
-) -> Optional[models.GoldPrediction]:
-    return db.execute(
-        select(models.GoldPrediction)
-        .where(
-            models.GoldPrediction.symbol == symbol,
-            models.GoldPrediction.horizon == horizon,
-            models.GoldPrediction.predicted_at == predicted_at,
-            models.GoldPrediction.target_timestamp == target_timestamp,
-        )
-        .limit(1)
-    ).scalar_one_or_none()
-
-
 def list_gold_predictions(
     db: Session,
     symbol: Optional[str] = None,

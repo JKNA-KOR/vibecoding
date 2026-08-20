@@ -113,3 +113,24 @@ class MarketGap(Base):
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     gap_percent = Column(Numeric(10, 4), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+
+
+class GoldPrediction(Base):
+    __tablename__ = "gold_predictions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(100), nullable=False)
+    horizon = Column(String(20), nullable=False)
+    predicted_price = Column(Numeric(18, 4), nullable=False)
+    predicted_at = Column(DateTime(timezone=True), nullable=False)
+    target_timestamp = Column(DateTime(timezone=True), nullable=False)
+    recommendation = Column(String(20), nullable=True)
+    confidence = Column(String(20), nullable=True)
+    training_mode = Column(String(50), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=datetime.utcnow,
+    )
+
+

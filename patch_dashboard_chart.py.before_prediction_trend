@@ -1,0 +1,502 @@
+from pathlib import Path
+import shutil
+import sys
+
+path = Path("templates/dashboard.html")
+backup = Path("templates/dashboard.html.bak")
+
+if not path.exists():
+    print(f"[ERROR] 파일이 없습니다: {path}")
+    sys.exit(1)
+
+original = path.read_text(encoding="utf-8")
+
+# ------------------------------------------------------------
+# 1. 백업
+# ------------------------------------------------------------
+shutil.copy2(path, backup)
+print(f"[OK] 백업 생성: {backup}")
+
+content = original
+
+# ------------------------------------------------------------
+# 2. HTML 오타 수정
+# ------------------------------------------------------------
+content = content.replace(
+    '<div id="shortPrice"class="prediction-price">',
+    '<div id="shortPrice" class="prediction-price">'
+)
+
+content = content.replace(
+    '<divclass="label">',
+    '<div class="label">'
+)
+
+# ------------------------------------------------------------
+# 3. 그래프 CSS 추가
+# ------------------------------------------------------------
+chart_css = r'''
+.chart-card{
+    background:#fff;
+    border:1px solid #e5e9f0;
+    border-radius:14px;
+    padding:18px;
+    box-shadow:0 2px 8px rgba(16,24,40,.04);
+}
+
+.chart-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    margin-bottom:12px;
+}
+
+.chart-title{
+    font-size:18px;
+    font-weight:800;
+}
+
+.chart-info{
+    color:#667085;
+    font-size:13px;
+}
+
+.chart-container{
+    position:relative;
+    width:100%;
+    height:360px;
+}
+
+#goldChart{
+    width:100%;
+    height:100%;
+    display:block;
+}
+
+.chart-empty{
+    position:absolute;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    color:#667085;
+    font-size:14px;
+    pointer-events:none;
+}
+
+@media(max-width:650px){
+    .chart-container{
+        height:280px;
+    }
+
+    .chart-header{
+        align-items:flex-start;
+        flex-direction:column;
+    }
+}
+'''
+
+style_marker = '</style>'
+
+if chart_css.strip() not in content:
+    if style_marker not in content:
+        print("[ERROR] </style> 태그를 찾을 수 없습니다.")
+        sys.exit(1)
+
+    content = content.replace(
+        style_marker,
+        chart_css + style_marker,
+        1
+    )
+    print("[OK] 그래프 CSS 추가")
+
+# ------------------------------------------------------------
+# 4. 그래프 HTML 추가
+# ------------------------------------------------------------
+chart_html = r'''
+<div class="section-title">ACE KRX금현물 시세 추세</div>
+<div class="chart-card">
+    <div class="chart-header">
+        <div class="chart-title">ACE KRX금현물</div>
+        <div id="goldChartInfo" class="chart-info">데이터를 불러오는 중...</div>
+    </div>
+
+    <div class="chart-container">
+        <canvas id="goldChart"></canvas>
+        <div id="goldChartEmpty" class="chart-empty" style="display:none;">
+            시세 데이터가 없습니다.
+        </div>
+    </div>
+</div>
+'''
+
+market_marker = '<div class="section-title">시장 데이터</div>'
+
+if chart_html.strip() not in content:
+    if market_marker not in content:
+        print("[ERROR] 시장 데이터 영역을 찾을 수 없습니다.")
+        sys.exit(1)
+
+    content = content.replace(
+        market_marker,
+        chart_html + market_marker,
+        1
+    )
+    print("[OK] 그래프 HTML 추가")
+
+# ------------------------------------------------------------
+# 5. 그래프 JavaScript 추가
+# ------------------------------------------------------------
+chart_js = r'''
+// ------------------------------------------------------------
+// ACE KRX금현물 시세 추세 그래프
+// ------------------------------------------------------------
+let goldChartData = [];
+
+function getAceGoldSeries(data) {
+    const series = data?.series?.ACE_KRX_GOLD;
+
+    if (!Array.isArray(series)) {
+        return [];
+    }
+
+    return series
+        .filter(item =>
+            item &&
+            item.timestamp &&
+            item.price != null &&
+            Number.isFinite(Number(item.price))
+        )
+        .map(item => ({
+            timestamp: item.timestamp,
+            price: Number(item.price)
+        }))
+        .sort((a, b) =>
+            new Date(a.timestamp) - new Date(b.timestamp)
+        );
+}
+
+function formatChartTime(timestamp) {
+    const date = new Date(timestamp);
+
+    if (Number.isNaN(date.getTime())) {
+        return "";
+    }
+
+    return date.toLocaleTimeString("ko-KR", {
+        hour: "2-digit",
+        minute: "2-digit"
+    });
+}
+
+function formatChartDateTime(timestamp) {
+    const date = new Date(timestamp);
+
+    if (Number.isNaN(date.getTime())) {
+        return timestamp;
+    }
+
+    return date.toLocaleString("ko-KR", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+    });
+}
+
+function drawAceGoldChart(data) {
+    const canvas = document.getElementById("goldChart");
+    const empty = document.getElementById("goldChartEmpty");
+    const info = document.getElementById("goldChartInfo");
+
+    if (!canvas) {
+        return;
+    }
+
+    const series = getAceGoldSeries(data);
+    goldChartData = series;
+
+    if (!series.length) {
+        canvas.style.display = "none";
+
+        if (empty) {
+            empty.style.display = "flex";
+        }
+
+        if (info) {
+            info.textContent = "데이터 없음";
+        }
+
+        return;
+    }
+
+    canvas.style.display = "block";
+
+    if (empty) {
+        empty.style.display = "none";
+    }
+
+    const container = canvas.parentElement;
+
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+
+    const dpr = window.devicePixelRatio || 1;
+
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
+
+    const ctx = canvas.getContext("2d");
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // 여백
+    const padding = {
+        top: 20,
+        right: 30,
+        bottom: 42,
+        left: 72
+    };
+
+    const chartWidth =
+        width - padding.left - padding.right;
+
+    const chartHeight =
+        height - padding.top - padding.bottom;
+
+    if (chartWidth <= 0 || chartHeight <= 0) {
+        return;
+    }
+
+    // 가격 범위
+    const prices = series.map(item => item.price);
+
+    let minPrice = Math.min(...prices);
+    let maxPrice = Math.max(...prices);
+
+    if (minPrice === maxPrice) {
+        minPrice -= 10;
+        maxPrice += 10;
+    }
+
+    const range = maxPrice - minPrice;
+
+    // 그래프 상하 여유
+    minPrice -= range * 0.08;
+    maxPrice += range * 0.08;
+
+    const x = index => {
+        if (series.length === 1) {
+            return padding.left + chartWidth / 2;
+        }
+
+        return padding.left +
+            (index / (series.length - 1)) * chartWidth;
+    };
+
+    const y = price =>
+        padding.top +
+        (maxPrice - price) /
+        (maxPrice - minPrice) *
+        chartHeight;
+
+    // 배경
+    ctx.clearRect(0, 0, width, height);
+
+    // --------------------------------------------------------
+    // Grid
+    // --------------------------------------------------------
+    ctx.font = "12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+
+    const gridCount = 5;
+
+    for (let i = 0; i <= gridCount; i++) {
+        const ratio = i / gridCount;
+        const price =
+            maxPrice -
+            ratio * (maxPrice - minPrice);
+
+        const yy =
+            padding.top +
+            ratio * chartHeight;
+
+        ctx.beginPath();
+        ctx.moveTo(padding.left, yy);
+        ctx.lineTo(width - padding.right, yy);
+
+        ctx.strokeStyle = "#edf0f5";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = "#667085";
+
+        ctx.fillText(
+            Math.round(price).toLocaleString("ko-KR"),
+            padding.left - 10,
+            yy
+        );
+    }
+
+    // --------------------------------------------------------
+    // X축 시간
+    // --------------------------------------------------------
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+
+    const xLabelCount = Math.min(6, series.length);
+
+    for (let i = 0; i < xLabelCount; i++) {
+        const index =
+            Math.round(
+                i *
+                (series.length - 1) /
+                Math.max(1, xLabelCount - 1)
+            );
+
+        const xx = x(index);
+
+        ctx.fillStyle = "#667085";
+
+        ctx.fillText(
+            formatChartTime(series[index].timestamp),
+            xx,
+            height - padding.bottom + 12
+        );
+    }
+
+    // --------------------------------------------------------
+    // Line
+    // --------------------------------------------------------
+    ctx.beginPath();
+
+    series.forEach((item, index) => {
+        const xx = x(index);
+        const yy = y(item.price);
+
+        if (index === 0) {
+            ctx.moveTo(xx, yy);
+        } else {
+            ctx.lineTo(xx, yy);
+        }
+    });
+
+    ctx.strokeStyle = "#2563eb";
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
+
+    // --------------------------------------------------------
+    // 최신 가격 점
+    // --------------------------------------------------------
+    const latest = series[series.length - 1];
+
+    const latestX = x(series.length - 1);
+    const latestY = y(latest.price);
+
+    ctx.beginPath();
+    ctx.arc(latestX, latestY, 5, 0, Math.PI * 2);
+
+    ctx.fillStyle = "#2563eb";
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(latestX, latestY, 9, 0, Math.PI * 2);
+
+    ctx.strokeStyle = "rgba(37,99,235,.18)";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    // --------------------------------------------------------
+    // 정보
+    // --------------------------------------------------------
+    if (info) {
+        info.textContent =
+            `${series.length.toLocaleString("ko-KR")}개 데이터 · ` +
+            `최근 ${latest.price.toLocaleString("ko-KR")}원 · ` +
+            `${formatChartDateTime(latest.timestamp)}`;
+    }
+}
+
+// ------------------------------------------------------------
+// 그래프 반응형 처리
+// ------------------------------------------------------------
+let goldChartResizeTimer = null;
+
+window.addEventListener("resize", () => {
+    clearTimeout(goldChartResizeTimer);
+
+    goldChartResizeTimer = setTimeout(() => {
+        if (goldChartData.length) {
+            drawAceGoldChart({
+                series: {
+                    ACE_KRX_GOLD: goldChartData
+                }
+            });
+        }
+    }, 150);
+});
+'''
+
+# render(d) 내부에서 그래프를 그리도록 추가
+render_marker = 'function render(d){'
+
+if chart_js.strip() not in content:
+    if render_marker not in content:
+        print("[ERROR] render(d) 함수를 찾을 수 없습니다.")
+        sys.exit(1)
+
+    content = content.replace(
+        render_marker,
+        chart_js + "\n" + render_marker,
+        1
+    )
+    print("[OK] 그래프 JavaScript 추가")
+
+# render(d) 함수 내부에 호출 추가
+render_call = ' drawAceGoldChart(d);'
+
+if render_call.strip() not in content:
+    status_marker = ' const status=document.getElementById("status");'
+
+    if status_marker not in content:
+        print("[ERROR] render 함수 삽입 위치를 찾을 수 없습니다.")
+        sys.exit(1)
+
+    content = content.replace(
+        status_marker,
+        render_call + "\n" + status_marker,
+        1
+    )
+
+    print("[OK] 그래프 렌더링 호출 추가")
+
+# ------------------------------------------------------------
+# 6. 변경사항 확인
+# ------------------------------------------------------------
+if content == original:
+    print("[WARNING] 변경사항이 없습니다.")
+    sys.exit(0)
+
+path.write_text(content, encoding="utf-8")
+
+print()
+print("=" * 60)
+print("[SUCCESS] dashboard.html 패치 완료")
+print("=" * 60)
+print(f"원본 백업 : {backup}")
+print(f"수정 파일 : {path}")
+print()
+print("다음 명령으로 변경사항을 확인하세요:")
+print("  git diff -- templates/dashboard.html")
+print()
+print("그래프 관련 코드 확인:")
+print('  grep -n "goldChart\\|ACE KRX금현물 시세 추세" templates/dashboard.html')

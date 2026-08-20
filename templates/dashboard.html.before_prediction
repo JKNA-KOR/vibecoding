@@ -1,0 +1,426 @@
+<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>GOLD AI Dashboard</title><style>*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f7fb;color:#172033}.container{max-width:1500px;margin:auto;padding:24px}h1{margin:0 0 6px}.subtitle,.label,.small,.status,.confidence{color:#667085}.grid,.prediction-grid,.metrics{display:grid;gap:14px}.grid{grid-template-columns:repeat(4,1fr);margin-bottom:18px}.prediction-grid{grid-template-columns:repeat(3,1fr)}.metrics{grid-template-columns:repeat(4,1fr)}.card,.prediction-card,.metric,.table-wrap{background:#fff;border:1px solid #e5e9f0;border-radius:14px;padding:18px;box-shadow:0 2px 8px rgba(16,24,40,.04)}.value{font-size:25px;font-weight:700;margin-top:7px}.prediction-card{min-height:250px}.horizon{font-size:13px;font-weight:700;color:#667085}.horizon-title{font-size:21px;font-weight:800;margin-top:4px}.prediction-price{font-size:28px;font-weight:800;margin:18px 0 8px}.signal{display:inline-block;border-radius:999px;padding:5px 12px;font-weight:800;font-size:13px;background:#eef2f7}.reason{margin-top:15px;line-height:1.55;font-size:14px}.confidence{margin-top:13px;font-size:13px}.section-title{font-size:18px;font-weight:800;margin:24px 0 12px}.table-wrap{overflow:auto;padding:0}table{width:100%;border-collapse:collapse}th,td{padding:12px 14px;border-bottom:1px solid #edf0f5;text-align:left;white-space:nowrap}th{color:#667085;font-size:12px}td{font-size:14px}.metric{padding:15px}@media(max-width:1100px){.grid,.prediction-grid,.metrics{grid-template-columns:repeat(2,1fr)}}@media(max-width:650px){.container{padding:14px}.grid,.prediction-grid,.metrics{grid-template-columns:1fr}}
+.chart-card{
+    background:#fff;
+    border:1px solid #e5e9f0;
+    border-radius:14px;
+    padding:18px;
+    box-shadow:0 2px 8px rgba(16,24,40,.04);
+}
+
+.chart-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    margin-bottom:12px;
+}
+
+.chart-title{
+    font-size:18px;
+    font-weight:800;
+}
+
+.chart-info{
+    color:#667085;
+    font-size:13px;
+}
+
+.chart-container{
+    position:relative;
+    width:100%;
+    height:360px;
+}
+
+#goldChart{
+    width:100%;
+    height:100%;
+    display:block;
+}
+
+.chart-empty{
+    position:absolute;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    color:#667085;
+    font-size:14px;
+    pointer-events:none;
+}
+
+@media(max-width:650px){
+    .chart-container{
+        height:280px;
+    }
+
+    .chart-header{
+        align-items:flex-start;
+        flex-direction:column;
+    }
+}
+</style></head><body><div class="container"><h1>GOLD AI Market Dashboard</h1><div class="subtitle">GDXU · 금선물 · 금광 · ACE KRX금현물을 종합한 다중 시간축 예측</div><div id="status" class="status">데이터를 불러오는 중...</div><div class="grid"><div class="card"><div class="label">ACE KRX금현물</div><div id="spot" class="value">-</div><div id="spotTime" class="small">-</div></div><div class="card"><div class="label">GDXU</div><div id="gdxu" class="value">-</div><div id="gdxuTime" class="small">-</div></div><div class="card"><div class="label">금선물</div><div id="futures" class="value">-</div><div id="futuresTime" class="small">-</div></div><div class="card"><div class="label">금광</div><div id="miners" class="value">-</div><div id="minersTime" class="small">-</div></div></div><div class="section-title">금 가격 예측</div><div class="prediction-grid"><div class="prediction-card"><div class="horizon">단기 · 약 3시간</div><div class="horizon-title">단타 추세</div><div id="shortPrice" class="prediction-price">-</div><span id="shortSignal" class="signal">-</span><div id="shortReason" class="reason">-</div><div id="shortConfidence" class="confidence">신뢰도: -</div></div><div class="prediction-card"><div class="horizon">중기 · 약 3일</div><div class="horizon-title">스윙 추세</div><div id="mediumPrice" class="prediction-price">-</div><span id="mediumSignal" class="signal">-</span><div id="mediumReason" class="reason">-</div><div id="mediumConfidence" class="confidence">신뢰도: -</div></div><div class="prediction-card"><div class="horizon">장기 · 약 30일</div><div class="horizon-title">중장기 추세</div><div id="longPrice" class="prediction-price">-</div><span id="longSignal" class="signal">-</span><div id="longReason" class="reason">-</div><div id="longConfidence" class="confidence">신뢰도: -</div></div></div><div class="section-title">예측 모델 지표</div><div class="metrics"><div class="metric"><div class="label">방향 예측률</div><div id="directionAccuracy" class="value">-</div></div><div class="metric"><div class="label">평균 오차 (MAE)</div><div id="mae" class="value">-</div></div><div class="metric"><div class="label">RMSE</div><div id="rmse" class="value">-</div></div><div class="metric"><div class="label">예측 설명력 (R²)</div><div id="r2" class="value">-</div></div></div>
+<div class="section-title">ACE KRX금현물 시세 추세</div>
+<div class="chart-card">
+    <div class="chart-header">
+        <div class="chart-title">ACE KRX금현물</div>
+        <div id="goldChartInfo" class="chart-info">데이터를 불러오는 중...</div>
+    </div>
+
+    <div class="chart-container">
+        <canvas id="goldChart"></canvas>
+        <div id="goldChartEmpty" class="chart-empty" style="display:none;">
+            시세 데이터가 없습니다.
+        </div>
+    </div>
+</div>
+<div class="section-title">시장 데이터</div><div class="table-wrap"><table><thead><tr><th>종목</th><th>현재가</th><th>업데이트</th></tr></thead><tbody id="quotesBody"></tbody></table></div></div><script>
+const API_URL="/api/dashboard-data";
+function fmt(v,d=2){if(v==null||Number.isNaN(Number(v)))return"-";return Number(v).toLocaleString("ko-KR",{minimumFractionDigits:d,maximumFractionDigits:d})}
+function fmtTime(v){if(!v)return"-";const d=new Date(v);return Number.isNaN(d.getTime())?v:d.toLocaleString("ko-KR",{hour12:false})}
+function setText(id,v){const e=document.getElementById(id);if(e)e.textContent=v}
+function renderPrediction(p,v){if(!v){setText(p+"Price","-");setText(p+"Signal","-");setText(p+"Reason","예측 데이터 없음");setText(p+"Confidence","신뢰도: -");return}setText(p+"Price",v.predicted_price==null?"-":fmt(v.predicted_price)+" 원");setText(p+"Signal",v.recommendation||"HOLD");setText(p+"Reason",v.explanation||v.reason||"예측 설명이 없습니다.");const c=v.confidence??v.model_metrics?.direction_accuracy??v.metrics?.direction_accuracy;setText(p+"Confidence",c==null?"신뢰도: -":"신뢰도: "+fmt(c)+"%")}
+function findP(d,keys){const roots=[d.predictions,d.prediction?.horizons,d.prediction];for(const root of roots){if(!root||typeof root!=="object")continue;for(const k of keys)if(root[k]&&typeof root[k]==="object")return root[k]}return null}
+function findModelMetrics(d){
+  const candidates=[
+    d?.prediction?.model_metrics,
+    d?.model_metrics,
+    d?.predictions?.model_metrics,
+    d?.prediction?.overall?.model_metrics,
+    d?.prediction?.horizons?.short?.model_metrics,
+    d?.prediction?.horizons?.medium?.model_metrics,
+    d?.prediction?.horizons?.long?.model_metrics,
+    d?.predictions?.short_term?.model_metrics,
+    d?.predictions?.medium_term?.model_metrics,
+    d?.predictions?.long_term?.model_metrics,
+    d?.predictions?.short?.model_metrics,
+    d?.predictions?.medium?.model_metrics,
+    d?.predictions?.long?.model_metrics
+  ];
+  return candidates.find(v=>v&&typeof v==="object"&&(
+    v.direction_accuracy!=null ||
+    v.mae_percent!=null ||
+    v.rmse_percent!=null ||
+    v.r2!=null
+  ))||{};
+}
+
+// ------------------------------------------------------------
+// ACE KRX금현물 시세 추세 그래프
+// ------------------------------------------------------------
+let goldChartData = [];
+
+function getAceGoldSeries(data) {
+    const series = data?.series?.ACE_KRX_GOLD;
+
+    if (!Array.isArray(series)) {
+        return [];
+    }
+
+    return series
+        .filter(item =>
+            item &&
+            item.timestamp &&
+            item.price != null &&
+            Number.isFinite(Number(item.price))
+        )
+        .map(item => ({
+            timestamp: item.timestamp,
+            price: Number(item.price)
+        }))
+        .sort((a, b) =>
+            new Date(a.timestamp) - new Date(b.timestamp)
+        );
+}
+
+function formatChartTime(timestamp) {
+    const date = new Date(timestamp);
+
+    if (Number.isNaN(date.getTime())) {
+        return "";
+    }
+
+    return date.toLocaleTimeString("ko-KR", {
+        hour: "2-digit",
+        minute: "2-digit"
+    });
+}
+
+function formatChartDateTime(timestamp) {
+    const date = new Date(timestamp);
+
+    if (Number.isNaN(date.getTime())) {
+        return timestamp;
+    }
+
+    return date.toLocaleString("ko-KR", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+    });
+}
+
+function drawAceGoldChart(data) {
+    const canvas = document.getElementById("goldChart");
+    const empty = document.getElementById("goldChartEmpty");
+    const info = document.getElementById("goldChartInfo");
+
+    if (!canvas) {
+        return;
+    }
+
+    const series = getAceGoldSeries(data);
+    goldChartData = series;
+
+    if (!series.length) {
+        canvas.style.display = "none";
+
+        if (empty) {
+            empty.style.display = "flex";
+        }
+
+        if (info) {
+            info.textContent = "데이터 없음";
+        }
+
+        return;
+    }
+
+    canvas.style.display = "block";
+
+    if (empty) {
+        empty.style.display = "none";
+    }
+
+    const container = canvas.parentElement;
+
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+
+    const dpr = window.devicePixelRatio || 1;
+
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
+
+    const ctx = canvas.getContext("2d");
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // 여백
+    const padding = {
+        top: 20,
+        right: 30,
+        bottom: 42,
+        left: 72
+    };
+
+    const chartWidth =
+        width - padding.left - padding.right;
+
+    const chartHeight =
+        height - padding.top - padding.bottom;
+
+    if (chartWidth <= 0 || chartHeight <= 0) {
+        return;
+    }
+
+    // 가격 범위
+    const prices = series.map(item => item.price);
+
+    let minPrice = Math.min(...prices);
+    let maxPrice = Math.max(...prices);
+
+    if (minPrice === maxPrice) {
+        minPrice -= 10;
+        maxPrice += 10;
+    }
+
+    const range = maxPrice - minPrice;
+
+    // 그래프 상하 여유
+    minPrice -= range * 0.08;
+    maxPrice += range * 0.08;
+
+    const x = index => {
+        if (series.length === 1) {
+            return padding.left + chartWidth / 2;
+        }
+
+        return padding.left +
+            (index / (series.length - 1)) * chartWidth;
+    };
+
+    const y = price =>
+        padding.top +
+        (maxPrice - price) /
+        (maxPrice - minPrice) *
+        chartHeight;
+
+    // 배경
+    ctx.clearRect(0, 0, width, height);
+
+    // --------------------------------------------------------
+    // Grid
+    // --------------------------------------------------------
+    ctx.font = "12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+
+    const gridCount = 5;
+
+    for (let i = 0; i <= gridCount; i++) {
+        const ratio = i / gridCount;
+        const price =
+            maxPrice -
+            ratio * (maxPrice - minPrice);
+
+        const yy =
+            padding.top +
+            ratio * chartHeight;
+
+        ctx.beginPath();
+        ctx.moveTo(padding.left, yy);
+        ctx.lineTo(width - padding.right, yy);
+
+        ctx.strokeStyle = "#edf0f5";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = "#667085";
+
+        ctx.fillText(
+            Math.round(price).toLocaleString("ko-KR"),
+            padding.left - 10,
+            yy
+        );
+    }
+
+    // --------------------------------------------------------
+    // X축 시간
+    // --------------------------------------------------------
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+
+    const xLabelCount = Math.min(6, series.length);
+
+    for (let i = 0; i < xLabelCount; i++) {
+        const index =
+            Math.round(
+                i *
+                (series.length - 1) /
+                Math.max(1, xLabelCount - 1)
+            );
+
+        const xx = x(index);
+
+        ctx.fillStyle = "#667085";
+
+        ctx.fillText(
+            formatChartTime(series[index].timestamp),
+            xx,
+            height - padding.bottom + 12
+        );
+    }
+
+    // --------------------------------------------------------
+    // Line
+    // --------------------------------------------------------
+    ctx.beginPath();
+
+    series.forEach((item, index) => {
+        const xx = x(index);
+        const yy = y(item.price);
+
+        if (index === 0) {
+            ctx.moveTo(xx, yy);
+        } else {
+            ctx.lineTo(xx, yy);
+        }
+    });
+
+    ctx.strokeStyle = "#2563eb";
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
+
+    // --------------------------------------------------------
+    // 최신 가격 점
+    // --------------------------------------------------------
+    const latest = series[series.length - 1];
+
+    const latestX = x(series.length - 1);
+    const latestY = y(latest.price);
+
+    ctx.beginPath();
+    ctx.arc(latestX, latestY, 5, 0, Math.PI * 2);
+
+    ctx.fillStyle = "#2563eb";
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(latestX, latestY, 9, 0, Math.PI * 2);
+
+    ctx.strokeStyle = "rgba(37,99,235,.18)";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    // --------------------------------------------------------
+    // 정보
+    // --------------------------------------------------------
+    if (info) {
+        info.textContent =
+            `${series.length.toLocaleString("ko-KR")}개 데이터 · ` +
+            `최근 ${latest.price.toLocaleString("ko-KR")}원 · ` +
+            `${formatChartDateTime(latest.timestamp)}`;
+    }
+}
+
+// ------------------------------------------------------------
+// 그래프 반응형 처리
+// ------------------------------------------------------------
+let goldChartResizeTimer = null;
+
+window.addEventListener("resize", () => {
+    clearTimeout(goldChartResizeTimer);
+
+    goldChartResizeTimer = setTimeout(() => {
+        if (goldChartData.length) {
+            drawAceGoldChart({
+                series: {
+                    ACE_KRX_GOLD: goldChartData
+                }
+            });
+        }
+    }, 150);
+});
+
+function render(d){
+ const q=d.latest_quotes||{},names=Object.keys(q),find=t=>{const n=names.find(x=>t.some(y=>x.includes(y)));return n?q[n]:null};
+ const s=find(["KRX금현물","ACE_KRX_GOLD"]),b=find(["골드선물","GOLD_FUTURES"]),c=find(["글로벌금채굴","GOLD_MINERS"]),a=find(["금광3배","MICROSECTOR","GDXU"]);
+ if(s){setText("spot",fmt(s.price));setText("spotTime",fmtTime(s.timestamp))}
+ if(b){setText("futures",fmt(b.price));setText("futuresTime",fmtTime(b.timestamp))}
+ if(c){setText("miners",fmt(c.price));setText("minersTime",fmtTime(c.timestamp))}
+ if(a){setText("gdxu",fmt(a.krw_price_div10??a.price_usd));setText("gdxuTime",fmtTime(a.timestamp))}
+ renderPrediction("short",findP(d,["short_term","short","intraday","3h"]));
+ renderPrediction("medium",findP(d,["medium_term","medium","3d"]));
+ renderPrediction("long",findP(d,["long_term","long","30d"]));
+ const m=findModelMetrics(d);
+ setText("directionAccuracy",m.direction_accuracy==null?"-":fmt(m.direction_accuracy)+"%");
+ setText("mae",m.mae_percent==null?"-":fmt(m.mae_percent,3)+"%");
+ setText("rmse",m.rmse_percent==null?"-":fmt(m.rmse_percent,3)+"%");
+ setText("r2",m.r2==null?"-":fmt(m.r2,3));
+ const body=document.getElementById("quotesBody");body.innerHTML="";
+ for(const [name,x] of Object.entries(q)){const tr=document.createElement("tr");tr.innerHTML=`<td>${name}</td><td>${fmt(x.krw_price_div10??x.price??x.price_usd)}</td><td>${fmtTime(x.timestamp)}</td>`;body.appendChild(tr)}
+ drawAceGoldChart(d);
+ const status=document.getElementById("status");
+ status.textContent=Object.keys(m).length?`마지막 갱신: ${new Date().toLocaleString("ko-KR",{hour12:false})} · 모델 지표 연결됨`:`마지막 갱신: ${new Date().toLocaleString("ko-KR",{hour12:false})} · 모델 지표 없음`;
+}
+async function load(){try{const r=await fetch(API_URL+"?t="+Date.now(),{cache:"no-store",headers:{"Accept":"application/json"}});if(!r.ok)throw Error("HTTP "+r.status);render(await r.json())}catch(e){const st=document.getElementById("status");st.className="status error";st.textContent="대시보드 데이터를 불러오지 못했습니다: "+e.message}}
+load();setInterval(load,60000)
+</script></body></html>

@@ -1465,33 +1465,6 @@ class MarketScheduler:
         db = self.db_session_factory()
 
         try:
-            # ----------------------------------------------------
-            # 동일 예측 중복 저장 방지
-            #
-            # 같은 symbol + horizon + predicted_at +
-            # target_timestamp는 동일한 하나의 예측으로 간주한다.
-            # ----------------------------------------------------
-            existing = crud.find_gold_prediction(
-                db,
-                symbol=symbol,
-                horizon=horizon,
-                predicted_at=predicted_at,
-                target_timestamp=target_timestamp,
-            )
-
-            if existing is not None:
-                logging.info(
-                    "GOLD PREDICTION SKIP DUPLICATE: "
-                    "symbol=%s horizon=%s predicted_at=%s "
-                    "target=%s price=%s",
-                    symbol,
-                    horizon,
-                    predicted_at,
-                    target_timestamp,
-                    existing.predicted_price,
-                )
-                return
-
             crud.create_gold_prediction(
                 db,
                 symbol=symbol,
@@ -1503,18 +1476,6 @@ class MarketScheduler:
                 confidence=confidence,
                 training_mode=training_mode,
             )
-
-            logging.info(
-                "GOLD PREDICTION SAVED: "
-                "symbol=%s horizon=%s price=%s "
-                "predicted_at=%s target=%s",
-                symbol,
-                horizon,
-                predicted_price,
-                predicted_at,
-                target_timestamp,
-            )
-
         finally:
             db.close()
 
@@ -1721,14 +1682,10 @@ class MarketScheduler:
         finally:
             db.close()
 
-        # DB 조회는 최신순이므로 그래프에서는
-        # 예측 대상 시점(target_timestamp) 기준으로 시간순 정렬한다.
-        #
-        # 그래프의 X축은 "예측을 만든 시점"이 아니라
-        # "예측했던 미래 시점"을 사용한다.
+        # DB 조회는 최신순이므로 그래프에서는 시간순으로 정렬한다.
         saved_predictions = sorted(
             saved_predictions,
-            key=lambda item: item.target_timestamp,
+            key=lambda item: item.predicted_at,
         )
 
         for prediction in saved_predictions:

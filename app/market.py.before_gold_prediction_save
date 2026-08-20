@@ -1450,74 +1450,6 @@ class MarketScheduler:
         finally:
             db.close()
 
-
-    def save_gold_prediction(
-        self,
-        symbol: str,
-        horizon: str,
-        predicted_price: Decimal,
-        predicted_at: datetime,
-        target_timestamp: datetime,
-        recommendation: str | None = None,
-        confidence: str | None = None,
-        training_mode: str | None = None,
-    ) -> None:
-        db = self.db_session_factory()
-
-        try:
-            # ----------------------------------------------------
-            # 동일 예측 중복 저장 방지
-            #
-            # 같은 symbol + horizon + predicted_at +
-            # target_timestamp는 동일한 하나의 예측으로 간주한다.
-            # ----------------------------------------------------
-            existing = crud.find_gold_prediction(
-                db,
-                symbol=symbol,
-                horizon=horizon,
-                predicted_at=predicted_at,
-                target_timestamp=target_timestamp,
-            )
-
-            if existing is not None:
-                logging.info(
-                    "GOLD PREDICTION SKIP DUPLICATE: "
-                    "symbol=%s horizon=%s predicted_at=%s "
-                    "target=%s price=%s",
-                    symbol,
-                    horizon,
-                    predicted_at,
-                    target_timestamp,
-                    existing.predicted_price,
-                )
-                return
-
-            crud.create_gold_prediction(
-                db,
-                symbol=symbol,
-                horizon=horizon,
-                predicted_price=predicted_price,
-                predicted_at=predicted_at,
-                target_timestamp=target_timestamp,
-                recommendation=recommendation,
-                confidence=confidence,
-                training_mode=training_mode,
-            )
-
-            logging.info(
-                "GOLD PREDICTION SAVED: "
-                "symbol=%s horizon=%s price=%s "
-                "predicted_at=%s target=%s",
-                symbol,
-                horizon,
-                predicted_price,
-                predicted_at,
-                target_timestamp,
-            )
-
-        finally:
-            db.close()
-
     def save_market_gap(self, timestamp: datetime, gap_percent: Decimal) -> None:
         db = self.db_session_factory()
         try:
@@ -1691,79 +1623,7 @@ class MarketScheduler:
                     for quote in history
                 ]
 
-        # ---------------------------------------------------------
-        # DB에 누적된 과거 예측값을 그래프용 시계열로 구성
-        #
-        # prediction_series[short|medium|long]
-        #
-        # 각 예측은
-        #   predicted_at    : 예측을 생성한 시점
-        #   target_timestamp : 예측 대상 미래 시점
-        #   price            : 예측 가격
-        #
-        # 을 모두 유지한다.
-        # ---------------------------------------------------------
         prediction_symbol = "ACE KRX금현물"
-
-        prediction_series: dict[str, list[dict[str, object]]] = {
-            "short": [],
-            "medium": [],
-            "long": [],
-        }
-
-        db = self.db_session_factory()
-        try:
-            saved_predictions = crud.list_gold_predictions(
-                db,
-                symbol=prediction_symbol,
-                limit=self.history_maxlen,
-            )
-        finally:
-            db.close()
-
-        # DB 조회는 최신순이므로 그래프에서는
-        # 예측 대상 시점(target_timestamp) 기준으로 시간순 정렬한다.
-        #
-        # 그래프의 X축은 "예측을 만든 시점"이 아니라
-        # "예측했던 미래 시점"을 사용한다.
-        saved_predictions = sorted(
-            saved_predictions,
-            key=lambda item: item.target_timestamp,
-        )
-
-        for prediction in saved_predictions:
-            horizon = str(prediction.horizon).lower()
-
-            if horizon not in prediction_series:
-                continue
-
-            try:
-                prediction_series[horizon].append(
-                    {
-                        "symbol": prediction.symbol,
-                        "price": float(prediction.predicted_price),
-                        "timestamp": prediction.predicted_at.isoformat(),
-                        "predicted_at": prediction.predicted_at.isoformat(),
-                        "target_timestamp": prediction.target_timestamp.isoformat(),
-                        "horizon": horizon,
-                        "recommendation": prediction.recommendation,
-                        "confidence": prediction.confidence,
-                        "training_mode": prediction.training_mode,
-                    }
-                )
-            except Exception as exc:
-                logging.warning(
-                    "예측 시계열 변환 실패: id=%s error=%s",
-                    getattr(prediction, "id", None),
-                    exc,
-                )
-
-        logging.info(
-            "PREDICTION TREND LOADED: short=%d medium=%d long=%d",
-            len(prediction_series["short"]),
-            len(prediction_series["medium"]),
-            len(prediction_series["long"]),
-        )
         normalized = self.normalize_symbol(prediction_symbol)
         history = self.history.get(normalized, deque())
         gold_history = self.history.get(
@@ -1803,81 +1663,6 @@ class MarketScheduler:
             miners_history,
             history,
         )
-
-
-        # --------------------------------------------------------
-        # 단기 / 중기 / 장기 예측 결과 DB 저장
-        # --------------------------------------------------------
-        if history:
-            prediction_at = history[-1].timestamp
-
-            for horizon_key in ("short", "medium", "long"):
-                horizon_data = multi_prediction.get(
-                    horizon_key,
-                    {},
-                )
-
-                if not isinstance(horizon_data, dict):
-                    continue
-
-                forecast_price = horizon_data.get(
-                    "predicted_price"
-                )
-
-                if forecast_price is None:
-                    continue
-
-                try:
-                    forecast_price_decimal = Decimal(
-                        str(forecast_price)
-                    )
-
-                    hours = float(
-                        horizon_data.get("hours", 0)
-                    )
-
-                    if hours <= 0:
-                        continue
-
-                    target_timestamp = (
-                        prediction_at
-                        + timedelta(hours=hours)
-                    )
-
-                    self.save_gold_prediction(
-                        symbol=prediction_symbol,
-                        horizon=horizon_key,
-                        predicted_price=forecast_price_decimal,
-                        predicted_at=prediction_at,
-                        target_timestamp=target_timestamp,
-                        recommendation=horizon_data.get(
-                            "recommendation",
-                            "HOLD",
-                        ),
-                        confidence=horizon_data.get(
-                            "confidence",
-                            "LOW",
-                        ),
-                        training_mode=horizon_data.get(
-                            "training_mode"
-                        ),
-                    )
-
-                    print(
-                        "GOLD PREDICTION SAVED:",
-                        horizon_key,
-                        forecast_price_decimal,
-                        prediction_at,
-                        target_timestamp,
-                    )
-
-                except Exception as exc:
-                    logging.exception(
-                        "Gold prediction DB 저장 실패: "
-                        "horizon=%s error=%s",
-                        horizon_key,
-                        exc,
-                    )
 
         short_prediction = multi_prediction.get("short", {})
         predicted_price = (
@@ -1991,11 +1776,6 @@ class MarketScheduler:
 
         return {
             "series": series,
-
-            # DB에 축적된 예측값의 과거 추세 + 미래 목표시점
-            # short / medium / long을 각각 독립적인 시계열로 전달한다.
-            "prediction_series": prediction_series,
-
             "fx_rate": float(fx_rate),
             "latest_quotes": latest_quotes,
             "prediction": {
